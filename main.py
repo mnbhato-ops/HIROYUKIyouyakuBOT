@@ -41,10 +41,10 @@ def save_history(history: List[str]) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Playwright による ACM ページ取得 (タイムアウト対策版)
+# Playwright による ACM ページ取得 (描画待機・構造解析強化版)
 # ---------------------------------------------------------------------------
 def fetch_papers_list() -> List[Dict[str, str]]:
-    """Playwright を使用して Headless Chrome で HTML を取得する"""
+    """Playwright を使用して HTML を正確に取得する"""
     print(f"[INFO] 論文一覧を取得中 (Playwright): {PROCEEDINGS_URL}")
     
     html_content = ""
@@ -59,58 +59,106 @@ def fetch_papers_list() -> List[Dict[str, str]]:
         )
         page = context.new_page()
 
-        # 不要なリソース（画像、フォント、スタイルシート）をブロックして高速化
-        page.route("**/*.{png,jpg,jpeg,svg,gif,css,woff,woff2}", lambda route: route.abort())
-
         try:
-            # networkidle ではなく domcontentloaded に変更（高速・タイムアウト防止）
+            # ページ読み込み
             page.goto(PROCEEDINGS_URL, wait_until="domcontentloaded", timeout=60000)
             
-            # DOM展開・JavaScript描画の待機（3秒）
-            time.sleep(3)
+            # 論文リンク要素が表示されるまで最大15秒待つ
+            page.wait_for_selector('a[href*="/doi/10.1145/"]', timeout=15000)
+            
+            # スクロールして動的コンテンツ（Lazy Load）を展開
+            for _ in range(5):
+                page.mouse.wheel(0, 2000)
+                time.sleep(1)
+
             html_content = page.content()
         except Exception as e:
-            print(f"[ERROR] Playwright ページの取得失敗: {e}")
+            print(f"[WARN] 待機中にタイムアウトまたはエラー発生 (取得済みコンテンツで解析を続行します): {e}")
+            html_content = page.content()
+        finally:
             browser.close()
-            return []
-        
-        browser.close()
+
+    if not html_content:
+        print("[ERROR] ページコンテンツが取得できませんでした。")
+        return []
 
     soup = BeautifulSoup(html_content, "html.parser")
     papers = []
 
-    paper_nodes = soup.find_all("div", class_=re.compile(r"issue-item|article-snippet"))
-    current_session = "General Session"
+    # ACM Proceedings の論文カード要素を探す
+    # 複数パターン（.issue-item, .accordion-tabbed__content, .issue-item__title など）に対応
+    paper_nodes = soup.find_all("div", class_=re.compile(r"issue-item|article-snippet|item-meta"))
+    
+    # ノードが取れない場合のバックアップ: 直接論文リンク（a[href*="/doi/10.1145/"]）を抽出
+    if not paper_nodes:
+        print("[INFO] クラス指定ノードが見つからないため、汎用リンク解析を実行します。")
+        doi_links = soup.find_all("a", href=re.compile(r"/doi/(abs/)?10\.1145/"))
+        seen_urls = set()
+        
+        for a in doi_links:
+            href = a.get("href", "")
+            title = a.get_text(strip=True)
+            
+            # 代表的なDOIリンクのみに絞り込み
+            if not title or len(title) < 5 or "pdf" in href.lower():
+                continue
+            
+            full_url = urllib.parse.urljoin("https://dl.acm.org", href).replace("/abs/", "/")
+            if full_url in seen_urls:
+                continue
+            seen_urls.add(full_url)
 
-    for node in paper_nodes:
-        session_elem = node.find_previous(["h2", "h3"], class_=re.compile(r"section-title|topic-heading"))
-        if session_elem:
-            current_session = session_elem.get_text(strip=True)
+            # 親要素周辺からオープンアクセス判定
+            parent = a.find_parent("div") or a.find_parent("li")
+            is_oa = False
+            if parent:
+                if parent.find("i", class_=re.compile(r"fa-unlock|open-access|oa-icon")) or parent.find("img", alt=re.compile(r"Open Access", re.I)):
+                    is_oa = True
+                elif parent.find("a", href=re.compile(r"/doi/pdf/")):
+                    is_oa = True
 
-        title_elem = node.find("h5", class_=re.compile(r"issue-item__title")) or node.find("a", class_=re.compile(r"publication-title"))
-        if not title_elem:
-            continue
+            papers.append({
+                "title": title,
+                "url": full_url,
+                "session": "Proceedings Session",
+                "is_open_access": is_oa,
+            })
+    else:
+        current_session = "General Session"
+        for node in paper_nodes:
+            session_elem = node.find_previous(["h2", "h3", "h4", "div"], class_=re.compile(r"section-title|topic-heading|accordion-tabbed__title"))
+            if session_elem:
+                current_session = session_elem.get_text(strip=True)
 
-        a_tag = title_elem.find("a") if title_elem.name != "a" else title_elem
-        if not a_tag or not a_tag.get("href"):
-            continue
+            title_elem = node.find(["h5", "h6", "span", "div"], class_=re.compile(r"issue-item__title|publication-title"))
+            a_tag = None
+            if title_elem:
+                a_tag = title_elem.find("a")
+            else:
+                a_tag = node.find("a", href=re.compile(r"/doi/"))
 
-        paper_title = a_tag.get_text(strip=True)
-        href = a_tag["href"]
-        paper_url = urllib.parse.urljoin("https://dl.acm.org", href)
+            if not a_tag or not a_tag.get("href"):
+                continue
 
-        is_open_access = False
-        if node.find("i", class_=re.compile(r"fa-unlock|open-access|oa-icon")):
-            is_open_access = True
-        elif node.find("a", class_=re.compile(r"pdf|download-pdf")):
-            is_open_access = True
+            paper_title = a_tag.get_text(strip=True)
+            if not paper_title or len(paper_title) < 5:
+                continue
 
-        papers.append({
-            "title": paper_title,
-            "url": paper_url,
-            "session": current_session,
-            "is_open_access": is_open_access,
-        })
+            href = a_tag["href"]
+            paper_url = urllib.parse.urljoin("https://dl.acm.org", href)
+
+            is_open_access = False
+            if node.find("i", class_=re.compile(r"fa-unlock|open-access|oa-icon")) or node.find("img", alt=re.compile(r"Open Access", re.I)):
+                is_open_access = True
+            elif node.find("a", href=re.compile(r"/doi/pdf/")):
+                is_open_access = True
+
+            papers.append({
+                "title": paper_title,
+                "url": paper_url,
+                "session": current_session,
+                "is_open_access": is_open_access,
+            })
 
     print(f"[INFO] 全 {len(papers)} 件の論文エントリーを検出しました。")
     return papers
@@ -118,7 +166,7 @@ def fetch_papers_list() -> List[Dict[str, str]]:
 
 def extract_pdf_text(paper_url: str) -> Optional[str]:
     """PDF ダウンロード"""
-    pdf_url = paper_url.replace("/doi/", "/doi/pdf/")
+    pdf_url = paper_url.replace("/doi/", "/doi/pdf/").replace("/doi/abs/", "/doi/pdf/")
     print(f"[INFO] PDFを取得中: {pdf_url}")
     
     headers = {
