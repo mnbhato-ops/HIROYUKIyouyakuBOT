@@ -21,7 +21,13 @@ HISTORY_FILE = "processed_papers.json"
 MAX_DAILY_PAPERS = 5
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/122.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/json, text/plain, */*",
+    "Referer": PROCEEDINGS_URL,
 }
 
 
@@ -45,103 +51,76 @@ def save_history(history: List[str]) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Crossref API / Direct Parse による論文一覧取得
+# ACM 公式 JSON API から論文一覧を確実に取得
 # ---------------------------------------------------------------------------
 def fetch_papers_list() -> List[Dict[str, str]]:
-    """Crossref API を使用して Proceeding に含まれる論文一覧を取得する"""
-    print(f"[INFO] Crossref API から論文一覧を取得中 (DOI: {PROCEEDINGS_DOI})...")
+    """ACM Digital Library の TOC (Table of Contents) データから論文を取得"""
+    print(f"[INFO] ACM API から Proceedings 情報を取得中 (DOI: {PROCEEDINGS_DOI})...")
     
-    api_url = f"https://api.crossref.org/works?filter=container-title:3772318&rows=100"
-
-    items = []
-    try:
-        res = requests.get(api_url, headers=HEADERS, timeout=30)
-        if res.status_code == 200:
-            data = res.json()
-            items = data.get("message", {}).get("items", [])
-    except Exception as e:
-        print(f"[ERROR] API取得失敗: {e}")
-
-    # APIで一覧が取れなかった場合のフォールバック
-    if not items:
-        return fetch_papers_via_acm_direct()
-
+    # 1. ACM の Crossref エンドポイント経由で全メンバーDOIを取得
+    url = f"https://api.crossref.org/works/{PROCEEDINGS_DOI}"
     papers = []
-    for item in items:
-        doi = item.get("DOI", "")
-        title = item.get("title", [""])[0]
-        url = item.get("URL", f"https://dl.acm.org/doi/{doi}")
+    
+    try:
+        res = requests.get(url, headers={"User-Agent": "ACM-Paper-Summarizer/1.0"}, timeout=30)
+        if res.status_code == 200:
+            data = res.json().get("message", {})
+            relation = data.get("relation", {})
+            
+            # has-part や includes に含まれる論文DOIのリストを取得
+            has_part = relation.get("has-part", [])
+            print(f"[INFO] 関連エントリー数: {len(has_part)}")
+            
+            for part in has_part:
+                doi = part.get("id", "")
+                if doi and "10.1145" in doi:
+                    paper_url = f"https://dl.acm.org/doi/{doi}"
+                    papers.append({
+                        "title": f"Paper ({doi})",
+                        "url": paper_url,
+                        "doi": doi,
+                        "session": "Proceedings Paper",
+                        "is_open_access": True
+                    })
+    except Exception as e:
+        print(f"[WARN] Crossref 取得エラー: {e}")
 
-        is_oa = False
-        licenses = item.get("license", [])
-        for lic in licenses:
-            if "creative commons" in lic.get("URL", "").lower() or "open" in lic.get("URL", "").lower():
-                is_oa = True
-                break
+    # 2. 上記で取得できない場合、ACM DL の HTML メタデータから直接全DOIパターンを抽出
+    if not papers:
+        print("[INFO] ACM DL ページからのメタデータダイレクト抽出を開始...")
+        try:
+            res = requests.get(PROCEEDINGS_URL, headers=HEADERS, timeout=30)
+            # ページ内のすべての DOI パターンを正規表現で一発抽出
+            dois = set(re.findall(r'10\.1145/3772318\.\d+|10\.1145/\d+\.\d+', res.text))
+            
+            # プロシーディング自身のDOIを除外
+            dois.discard(PROCEEDINGS_DOI)
+            
+            for doi in dois:
+                papers.append({
+                    "title": f"ACM Paper ({doi})",
+                    "url": f"https://dl.acm.org/doi/{doi}",
+                    "doi": doi,
+                    "session": "Session Paper",
+                    "is_open_access": True
+                })
+            print(f"[INFO] 正規表現抽出により {len(papers)} 件の論文DOIを発見しました。")
+        except Exception as e:
+            print(f"[ERROR] 抽出失敗: {e}")
 
-        if title and doi:
-            papers.append({
-                "title": title,
-                "url": url,
-                "doi": doi,
-                "session": "Main Proceedings",
-                "is_open_access": is_oa or True
-            })
-
-    print(f"[INFO] 全 {len(papers)} 件の論文エントリーを検出しました。")
+    print(f"[INFO] 合計 {len(papers)} 件の対象論文を検出しました。")
     return papers
 
 
-def fetch_papers_via_acm_direct() -> List[Dict[str, str]]:
-    """ACM DL ページのパースフォールバック"""
-    print(f"[INFO] ACM DL ページをパース中...")
-    page_url = PROCEEDINGS_URL
-    
-    session = requests.Session()
-    session.headers.update(HEADERS)
-    
-    try:
-        res = session.get(page_url, timeout=30)
-        soup = BeautifulSoup(res.text, "html.parser")
-        
-        papers = []
-        links = soup.find_all("a", href=re.compile(r"/doi/(10\.1145/\d+)"))
-        seen = set()
-        
-        for a in links:
-            href = a.get("href", "")
-            title = a.get_text(strip=True)
-            if not title or len(title) < 5 or "pdf" in href.lower():
-                continue
-            
-            full_url = urllib.parse.urljoin("https://dl.acm.org", href)
-            if full_url in seen:
-                continue
-            seen.add(full_url)
-            
-            papers.append({
-                "title": title,
-                "url": full_url,
-                "session": "Session Paper",
-                "is_open_access": True
-            })
-            
-        print(f"[INFO] 直接パースにより {len(papers)} 件検出しました。")
-        return papers
-    except Exception as e:
-        print(f"[ERROR] パース失敗: {e}")
-        return []
-
-
 def extract_pdf_text(paper_url: str) -> Optional[str]:
-    """PDF ダウンロード"""
+    """PDFをダウンロードしてテキスト化（タイトル補正付き）"""
     pdf_url = paper_url.replace("/doi/", "/doi/pdf/").replace("/doi/abs/", "/doi/pdf/")
     print(f"[INFO] PDFを取得中: {pdf_url}")
 
     try:
         res = requests.get(pdf_url, headers=HEADERS, timeout=30)
         if res.status_code != 200:
-            print(f"[WARN] PDFの直接取得に失敗 (Status: {res.status_code})。スキップします。")
+            print(f"[WARN] PDF取得失敗 (Status: {res.status_code})。有料または閲覧制限のためスキップします。")
             return None
 
         pdf_file = BytesIO(res.content)
@@ -154,7 +133,9 @@ def extract_pdf_text(paper_url: str) -> Optional[str]:
             if text:
                 extracted_text += text + "\n"
 
-        return extracted_text if len(extracted_text.strip()) > 200 else None
+        if len(extracted_text.strip()) > 200:
+            return extracted_text
+        return None
 
     except Exception as e:
         print(f"[ERROR] PDF抽出失敗: {e}")
@@ -172,18 +153,17 @@ def summarize_with_gemini(title: str, text: str) -> str:
     client = genai.Client(api_key=api_key)
 
     prompt = f"""
-以下の学術論文のテキストを解析し、日本語で分かりやすく構造化要約を作成してください。
-
-【論文タイトル】: {title}
+以下の学術論文のテキスト本文を解析し、日本語で分かりやすく構造化要約を作成してください。
+最初に本文から正確な「論文タイトル」を読み取って記載してください。
 
 【要約フォーマット】:
-■ 論文タイトル (日本語訳)
+■ 論文タイトル (日本語訳および英語原題)
 ■ 一言概要 (1〜2行)
 ■ 研究の背景・課題
 ■ 提案手法・アプローチ
 ■ 主な結果・成果
 
-【抽出テキスト】:
+【論文テキスト】:
 {text[:12000]}
 """
 
@@ -210,7 +190,7 @@ def send_to_slack(session: str, url: str, summary: str) -> None:
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
-                    "text": f"*📌 Session:* {session}\n*🔗 Original URL:* {url}"
+                    "text": f"*📌 ACM Proceeding Paper*\n*🔗 Original URL:* {url}"
                 }
             },
             {
@@ -251,11 +231,11 @@ def main():
             continue
 
         print(f"\n==========================================")
-        print(f"[処理開始 ({processed_count + 1}/{MAX_DAILY_PAPERS})]: {paper['title']}")
+        print(f"[処理開始 ({processed_count + 1}/{MAX_DAILY_PAPERS})]: {paper['url']}")
         
         pdf_text = extract_pdf_text(paper["url"])
         if not pdf_text:
-            print(f"[SKIP] PDFテキストが抽出できなかったため（有料または取得制限）スキップします。")
+            print(f"[SKIP] PDFを取得できなかったため（有料記事またはダウンロード制限）スキップします。")
             continue
 
         try:
