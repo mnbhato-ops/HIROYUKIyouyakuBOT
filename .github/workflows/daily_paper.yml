@@ -2,7 +2,8 @@ name: ACM Paper Summarizer
 
 on:
   schedule:
-    - cron: '0 0 * * *'
+    # 日本時間 (JST) 平日(月〜金) 朝9:00 に自動実行 (UTC 0:00 = JST 9:00)
+    - cron: '0 0 * * 1-5'
   workflow_dispatch:
 
 jobs:
