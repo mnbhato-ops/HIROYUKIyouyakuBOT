@@ -4,7 +4,7 @@ on:
   schedule:
     # 毎日 00:00 UTC (日本時間 09:00 AM) に実行
     - cron: '0 0 * * *'
-  workflow_dispatch: # GitHubの画面から手動実行も可能
+  workflow_dispatch: # 手動実行ボタン
 
 jobs:
   run-summarizer:
@@ -23,6 +23,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+          python -m playwright install chromium --with-deps
 
       - name: Run Paper Summarizer
         env:
@@ -35,5 +36,7 @@ jobs:
         run: |
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
-          git add processed_papers.json
-          git diff --quiet && git diff --staged --quiet || (git commit -m "Chore: Update processed papers history [skip ci]" && git push)
+          if [ -f processed_papers.json ]; then
+            git add processed_papers.json
+            git diff --quiet && git diff --staged --quiet || (git commit -m "Chore: Update processed papers history [skip ci]" && git push)
+          fi
