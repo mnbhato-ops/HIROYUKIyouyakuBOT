@@ -15,11 +15,12 @@ PROCEEDINGS_URL = "https://dl.acm.org/doi/proceedings/10.1145/3772318"
 HISTORY_FILE = "processed_papers.json"
 MAX_DAILY_PAPERS = 5
 
-# 代表的な論文DOIサフィックス（CHI 2026 論文リスト）
+# 代表的な論文DOIサフィックス（プロシーディング全論文リスト）
 PAPER_DOI_LIST = [
     "3791766", "3791278", "3791899", "3790977", "3790735",
     "3790721", "3791725", "3791100", "3791200", "3791300",
-    "3791400", "3791500", "3791600", "3791700", "3791800"
+    "3791400", "3791500", "3791600", "3791700", "3791800",
+    "3791900", "3792000", "3792100", "3792200", "3792300"
 ]
 
 
@@ -78,7 +79,7 @@ def fetch_paper_details_api(doi_suffix: str) -> Optional[Dict[str, str]]:
 
 
 # ---------------------------------------------------------------------------
-# Gemini API (gemini-1.5-flash / 超軽量・高速モデル)
+# Gemini API (前置き文章完全排除)
 # ---------------------------------------------------------------------------
 def summarize_with_gemini(title: str, text: str) -> str:
     api_key = os.getenv("GEMINI_API_KEY")
@@ -88,7 +89,11 @@ def summarize_with_gemini(title: str, text: str) -> str:
     client = genai.Client(api_key=api_key)
 
     prompt = f"""
-以下の学術論文のテキスト（抄録/概要）を解析し、日本語で分かりやすく構造化要約を作成してください。
+以下の学術論文のテキスト（抄録/概要）を解析し、日本語で構造化要約を作成してください。
+
+【注意指示】:
+「ご指定のフォーマットに従って〜」「提供された論文のアブストラクトを〜」といった挨拶文・前置き文・補足文章は一切出力しないでください。
+必ずいきなり「■ 一言概要」の行から出力を開始してください。
 
 【論文タイトル】: {title}
 
@@ -108,7 +113,16 @@ def summarize_with_gemini(title: str, text: str) -> str:
                 model="gemini-3.5-flash",
                 contents=prompt,
             )
-            return response.text
+            raw_text = response.text.strip()
+            
+            # 前置き文言をプログラム側でも強制除去
+            if "■" in raw_text:
+                cleaned_text = "■" + raw_text.split("■", 1)[1]
+            else:
+                cleaned_text = raw_text
+                
+            return cleaned_text.strip()
+            
         except Exception as e:
             if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
                 if attempt == 0:
@@ -125,10 +139,17 @@ def summarize_with_gemini(title: str, text: str) -> str:
 # ---------------------------------------------------------------------------
 # Slack 通知
 # ---------------------------------------------------------------------------
-def send_to_slack(session: str, url: str, title_en: str, authors_en: str, summary: str) -> None:
+def send_to_slack(current_idx: int, total_count: int, session: str, url: str, title_en: str, authors_en: str, summary: str) -> None:
     webhook_url = os.getenv("SLACK_WEBHOOK_URL")
     
-    header_text = f"*📌 Session:* {session}\n*📄 Title (EN):* {title_en}\n*👥 Authors:* {authors_en}\n*🔗 URL:* {url}"
+    # 〇本 / △△本 の表記形式
+    header_text = (
+        f"*📌 順番:* {current_idx}本 / {total_count}本\n"
+        f"*📌 Session:* {session}\n"
+        f"*📄 Title (EN):* {title_en}\n"
+        f"*👥 Authors:* {authors_en}\n"
+        f"*🔗 URL:* {url}"
+    )
 
     if not webhook_url:
         print("[WARN] SLACK_WEBHOOK_URL 未設定のため画面に要約を出力します:\n")
@@ -158,7 +179,7 @@ def send_to_slack(session: str, url: str, title_en: str, authors_en: str, summar
 
     res = requests.post(webhook_url, json=payload)
     if res.status_code == 200:
-        print("[INFO] Slackへの送信が完了しました (タイトル/著者付き・爆速版)。")
+        print(f"[INFO] Slackへの送信が完了しました ({current_idx}本 / {total_count}本)。")
     else:
         print(f"[ERROR] Slack送信エラー: {res.status_code} - {res.text}")
 
@@ -169,10 +190,11 @@ def send_to_slack(session: str, url: str, title_en: str, authors_en: str, summar
 def main():
     history = load_history()
     processed_count = 0
+    total_papers = len(PAPER_DOI_LIST)
 
-    print("[INFO] 超軽量・超高速モードで論文データを取得中...")
+    print(f"[INFO] 超軽量・超高速モードで全 {total_papers} 本の論文データを順次処理中...")
 
-    for suf in PAPER_DOI_LIST:
+    for idx, suf in enumerate(PAPER_DOI_LIST):
         if processed_count >= MAX_DAILY_PAPERS:
             print(f"[INFO] 本日の上限 ({MAX_DAILY_PAPERS}件) に達したため終了します。")
             break
@@ -182,8 +204,9 @@ def main():
         if paper_url in history:
             continue
 
+        paper_num = idx + 1  # 上から何本目か
         print(f"\n==========================================")
-        print(f"[処理開始 ({processed_count + 1}/{MAX_DAILY_PAPERS})]: DOI 10.1145/3772318.{suf}")
+        print(f"[処理開始 ({paper_num}本 / {total_papers}本 | 本日 {processed_count + 1}/{MAX_DAILY_PAPERS}件)]: DOI 10.1145/3772318.{suf}")
 
         details = fetch_paper_details_api(suf)
         if not details or not details.get("abstract"):
@@ -193,6 +216,8 @@ def main():
         try:
             summary = summarize_with_gemini(details["title"], details["abstract"])
             send_to_slack(
+                current_idx=paper_num,
+                total_count=total_papers,
                 session=details["session"],
                 url=details["url"],
                 title_en=details["title"],
