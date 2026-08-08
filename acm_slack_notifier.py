@@ -18,6 +18,7 @@ MAX_DAILY_PAPERS = 5
 # ACM CHI プロシーディング全1,700本規模の DOI 連番レンジ (3790700 〜 3792400)
 DOI_START = 3790700
 DOI_END = 3792400
+TOTAL_PROCEEDINGS_PAPERS = DOI_END - DOI_START + 1  # 全1,701本
 
 
 # ---------------------------------------------------------------------------
@@ -55,7 +56,6 @@ def fetch_paper_details_api(doi_suffix: int) -> Optional[Dict[str, str]]:
             data = r.json()
             title = data.get("title") or ""
             abstract = data.get("abstract") or ""
-            venue = data.get("venue") or "ACM CHI Conference"
             raw_authors = data.get("authors", [])
             authors = [a.get("name") for a in raw_authors if a.get("name")]
             authors_str = ", ".join(authors) if authors else "Authors Unknown"
@@ -65,7 +65,6 @@ def fetch_paper_details_api(doi_suffix: int) -> Optional[Dict[str, str]]:
                     "doi": doi,
                     "title": title,
                     "abstract": abstract,
-                    "session": venue,
                     "authors": authors_str,
                     "url": url
                 }
@@ -135,15 +134,14 @@ def summarize_with_gemini(title: str, text: str) -> str:
 # ---------------------------------------------------------------------------
 # Slack 通知
 # ---------------------------------------------------------------------------
-def send_to_slack(current_paper_num: int, session: str, url: str, title_en: str, authors_en: str, summary: str) -> None:
+def send_to_slack(current_paper_num: int, total_count: int, url: str, title: str, authors: str, summary: str) -> None:
     webhook_url = os.getenv("SLACK_WEBHOOK_URL")
     
-    # 飛ぶことなく絶対に連続する「〇本目」の表記
+    # ご指定通りのヘッダーフォーマット (Session削除、Title(EN)->Title、5本 / 1701本)
     header_text = (
-        f"*📌 順番:* {current_paper_num}本目\n"
-        f"*📌 Session:* {session}\n"
-        f"*📄 Title (EN):* {title_en}\n"
-        f"*👥 Authors:* {authors_en}\n"
+        f"*📌 順番:* {current_paper_num}本 / {total_count}本\n"
+        f"*📄 Title:* {title}\n"
+        f"*👥 Authors:* {authors}\n"
         f"*🔗 URL:* {url}"
     )
 
@@ -175,7 +173,7 @@ def send_to_slack(current_paper_num: int, session: str, url: str, title_en: str,
 
     res = requests.post(webhook_url, json=payload)
     if res.status_code == 200:
-        print(f"[INFO] Slackへの送信が完了しました ({current_paper_num}本目)。")
+        print(f"[INFO] Slackへの送信が完了しました ({current_paper_num}本 / {total_count}本)。")
     else:
         print(f"[ERROR] Slack送信エラー: {res.status_code} - {res.text}")
 
@@ -187,10 +185,10 @@ def main():
     history = load_history()
     processed_count = 0
     
-    # 過去に正常投稿された通算論文数（連続カウント）
+    # 過去に正常投稿された通算論文数
     valid_paper_counter = len(history)
 
-    print(f"[INFO] プロシーディング全体から有効な論文データを探索・順次配信中 (現在の通算送信数: {valid_paper_counter}本)...")
+    print(f"[INFO] プロシーディング全体 ({TOTAL_PROCEEDINGS_PAPERS}本) から有効な論文データを探索中...")
 
     for doi_suffix in range(DOI_START, DOI_END + 1):
         if processed_count >= MAX_DAILY_PAPERS:
@@ -202,26 +200,24 @@ def main():
         if paper_url in history:
             continue
 
-        # APIで有効な論文（アブストラクトあり）か判定
         details = fetch_paper_details_api(doi_suffix)
         if not details or not details.get("abstract"):
-            # 動画・音声・アブストラクトなし等の非論文データは静かにスキップ
             continue
 
-        # 有効な論文がヒットしたら連番カウントを1増やす（絶対に数字が飛ばない）
+        # 有効な論文がヒットしたらカウントを増やす
         valid_paper_counter += 1
 
         print(f"\n==========================================")
-        print(f"[処理開始 (通算 {valid_paper_counter}本目 | 本日 {processed_count + 1}/{MAX_DAILY_PAPERS}件)]: DOI 10.1145/3772318.{doi_suffix}")
+        print(f"[処理開始 ({valid_paper_counter}本 / {TOTAL_PROCEEDINGS_PAPERS}本 | 本日 {processed_count + 1}/{MAX_DAILY_PAPERS}件)]: DOI 10.1145/3772318.{doi_suffix}")
 
         try:
             summary = summarize_with_gemini(details["title"], details["abstract"])
             send_to_slack(
                 current_paper_num=valid_paper_counter,
-                session=details["session"],
+                total_count=TOTAL_PROCEEDINGS_PAPERS,
                 url=details["url"],
-                title_en=details["title"],
-                authors_en=details["authors"],
+                title=details["title"],
+                authors=details["authors"],
                 summary=summary
             )
 
@@ -233,7 +229,6 @@ def main():
 
         except Exception as e:
             print(f"[ERROR] 処理中にエラーが発生しました: {e}")
-            # エラーの場合はカウントを戻す
             valid_paper_counter -= 1
 
     print(f"\n[INFO] 処理完了。本日新たに処理した論文数: {processed_count} 件")
