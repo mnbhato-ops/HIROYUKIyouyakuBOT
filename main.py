@@ -4,31 +4,19 @@ import re
 import sys
 import time
 import urllib.parse
-from io import BytesIO
 from typing import Dict, List, Optional
 
 from bs4 import BeautifulSoup
+from DrissionPage import ChromiumPage, ChromiumOptions
 from google import genai
-import pypdf
 import requests
 
 # ---------------------------------------------------------------------------
 # 設定値
 # ---------------------------------------------------------------------------
-PROCEEDINGS_DOI = "10.1145/3772318"
-PROCEEDINGS_URL = f"https://dl.acm.org/doi/proceedings/{PROCEEDINGS_DOI}"
+PROCEEDINGS_URL = "https://dl.acm.org/doi/proceedings/10.1145/3772318"
 HISTORY_FILE = "processed_papers.json"
 MAX_DAILY_PAPERS = 5
-
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/122.0.0.0 Safari/537.36"
-    ),
-    "Accept": "application/json, text/plain, */*",
-    "Referer": PROCEEDINGS_URL,
-}
 
 
 # ---------------------------------------------------------------------------
@@ -51,99 +39,127 @@ def save_history(history: List[str]) -> None:
 
 
 # ---------------------------------------------------------------------------
-# ACM 公式 JSON API から論文一覧を確実に取得
+# DrissionPage による ACM ページ取得 (Cloudflare 回避 & アコーディオン全開対応)
 # ---------------------------------------------------------------------------
-def fetch_papers_list() -> List[Dict[str, str]]:
-    """ACM Digital Library の TOC (Table of Contents) データから論文を取得"""
-    print(f"[INFO] ACM API から Proceedings 情報を取得中 (DOI: {PROCEEDINGS_DOI})...")
+def fetch_papers_list(page: ChromiumPage) -> List[Dict[str, str]]:
+    """DrissionPage で Cloudflare を回避し、アコーディオンを展開して論文一覧を取得する"""
+    print(f"[INFO] 論文一覧を取得中 (ACM DL): {PROCEEDINGS_URL}")
     
-    # 1. ACM の Crossref エンドポイント経由で全メンバーDOIを取得
-    url = f"https://api.crossref.org/works/{PROCEEDINGS_DOI}"
-    papers = []
+    page.get(PROCEEDINGS_URL)
     
+    # Cloudflare 通過待ち (最大 20 秒)
+    for i in range(20):
+        if "Just a moment" in page.title or "しばらく" in page.title:
+            time.sleep(1)
+        else:
+            break
+
+    print(f"[INFO] ページ読み込み完了: {page.title}")
+
+    # クッキー同意ポップアップがあれば閉じる
     try:
-        res = requests.get(url, headers={"User-Agent": "ACM-Paper-Summarizer/1.0"}, timeout=30)
-        if res.status_code == 200:
-            data = res.json().get("message", {})
-            relation = data.get("relation", {})
-            
-            # has-part や includes に含まれる論文DOIのリストを取得
-            has_part = relation.get("has-part", [])
-            print(f"[INFO] 関連エントリー数: {len(has_part)}")
-            
-            for part in has_part:
-                doi = part.get("id", "")
-                if doi and "10.1145" in doi:
-                    paper_url = f"https://dl.acm.org/doi/{doi}"
-                    papers.append({
-                        "title": f"Paper ({doi})",
-                        "url": paper_url,
-                        "doi": doi,
-                        "session": "Proceedings Paper",
-                        "is_open_access": True
-                    })
+        onetrust_btn = page.ele("#onetrust-accept-btn-handler", timeout=2)
+        if onetrust_btn:
+            onetrust_btn.click()
+    except Exception:
+        pass
+
+    # スクロールして遅延読み込みを完了させる
+    for _ in range(3):
+        page.scroll.down(1000)
+        time.sleep(1)
+
+    # 「Expand all」またはアコーディオンを展開
+    print("[INFO] セッションアコーディオンを展開中...")
+    try:
+        expand_btn = page.ele('text:Expand all', timeout=3)
+        if expand_btn:
+            expand_btn.click()
+            time.sleep(3)
+        else:
+            headers = page.eles('.accordion-tabbed__control')
+            for h in headers:
+                try:
+                    h.click()
+                    time.sleep(0.3)
+                except Exception:
+                    pass
     except Exception as e:
-        print(f"[WARN] Crossref 取得エラー: {e}")
+        print(f"[WARN] アコーディオン展開中にスキップ: {e}")
 
-    # 2. 上記で取得できない場合、ACM DL の HTML メタデータから直接全DOIパターンを抽出
-    if not papers:
-        print("[INFO] ACM DL ページからのメタデータダイレクト抽出を開始...")
-        try:
-            res = requests.get(PROCEEDINGS_URL, headers=HEADERS, timeout=30)
-            # ページ内のすべての DOI パターンを正規表現で一発抽出
-            dois = set(re.findall(r'10\.1145/3772318\.\d+|10\.1145/\d+\.\d+', res.text))
-            
-            # プロシーディング自身のDOIを除外
-            dois.discard(PROCEEDINGS_DOI)
-            
-            for doi in dois:
-                papers.append({
-                    "title": f"ACM Paper ({doi})",
-                    "url": f"https://dl.acm.org/doi/{doi}",
-                    "doi": doi,
-                    "session": "Session Paper",
-                    "is_open_access": True
-                })
-            print(f"[INFO] 正規表現抽出により {len(papers)} 件の論文DOIを発見しました。")
-        except Exception as e:
-            print(f"[ERROR] 抽出失敗: {e}")
+    time.sleep(2)
+    html_content = page.html
+    soup = BeautifulSoup(html_content, "html.parser")
+    
+    # 論文DOIリンクの正規表現抽出
+    all_links = soup.find_all("a", href=re.compile(r"/doi/(abs/|full/)?10\.1145/3772318\.\d+"))
+    seen_urls = set()
+    papers = []
 
-    print(f"[INFO] 合計 {len(papers)} 件の対象論文を検出しました。")
+    for a in all_links:
+        href = a.get("href", "")
+        # PDFダウンロードリンクや補足資料、重複は除く
+        if "/pdf/" in href or "cited-by" in href or "purchase-access" in href or "supplemental" in href:
+            continue
+
+        title = a.get_text(strip=True)
+        # タイトルが短すぎるもの・Podcast・補足ファイルは除外
+        if not title or len(title) < 8 or title.lower() in ["pdf", "epub", "abstract", "get access"] or title.endswith((".mp4", ".pdf", ".vtt", ".zip")):
+            continue
+            
+        if "session summary podcast" in title.lower() or "podcast:" in title.lower():
+            continue
+
+        full_url = urllib.parse.urljoin("https://dl.acm.org", href).split("?")[0]
+        full_url = re.sub(r"/doi/(abs|full)/", "/doi/", full_url)
+
+        if full_url in seen_urls:
+            continue
+        seen_urls.add(full_url)
+
+        # セッションタイトルの取得
+        session_name = "General Session"
+        section_elem = a.find_previous(class_=re.compile(r"accordion-tabbed__title|section__title|topic-heading|heading"))
+        if section_elem:
+            session_name = section_elem.get_text(strip=True)
+
+        papers.append({
+            "title": title,
+            "url": full_url,
+            "session": session_name,
+        })
+
+    print(f"[INFO] 全 {len(papers)} 件の有効な論文エントリーを検出しました。")
     return papers
 
 
-def extract_pdf_text(paper_url: str) -> Optional[str]:
-    """PDFをダウンロードしてテキスト化（タイトル補正付き）"""
-    pdf_url = paper_url.replace("/doi/", "/doi/pdf/").replace("/doi/abs/", "/doi/pdf/")
-    print(f"[INFO] PDFを取得中: {pdf_url}")
+def fetch_paper_details(page: ChromiumPage, paper_url: str) -> Dict[str, Optional[str]]:
+    """論文個別ページから Abstract (抄録) を取得する"""
+    print(f"[INFO] 論文詳細ページを取得中: {paper_url}")
+    
+    page.get(paper_url)
+    for i in range(15):
+        if "Just a moment" in page.title or "しばらく" in page.title:
+            time.sleep(1)
+        else:
+            break
 
-    try:
-        res = requests.get(pdf_url, headers=HEADERS, timeout=30)
-        if res.status_code != 200:
-            print(f"[WARN] PDF取得失敗 (Status: {res.status_code})。有料または閲覧制限のためスキップします。")
-            return None
+    html = page.html
+    soup = BeautifulSoup(html, "html.parser")
 
-        pdf_file = BytesIO(res.content)
-        reader = pypdf.PdfReader(pdf_file)
-        
-        extracted_text = ""
-        max_pages = min(len(reader.pages), 8)
-        for page_idx in range(max_pages):
-            text = reader.pages[page_idx].extract_text()
-            if text:
-                extracted_text += text + "\n"
+    # Abstract 抽出
+    abstract_elem = soup.find(class_=re.compile(r"abstractSection|abstractInFull|abstract-content")) or \
+                    soup.find("section", id="abstract") or \
+                    soup.find("div", class_=re.compile(r"abstract"))
+    abstract_text = abstract_elem.get_text(strip=True) if abstract_elem else ""
 
-        if len(extracted_text.strip()) > 200:
-            return extracted_text
-        return None
-
-    except Exception as e:
-        print(f"[ERROR] PDF抽出失敗: {e}")
-        return None
+    return {
+        "abstract": abstract_text,
+    }
 
 
 # ---------------------------------------------------------------------------
-# Gemini API (gemini-3.5-flash)
+# Gemini API (gemini-2.5-flash)
 # ---------------------------------------------------------------------------
 def summarize_with_gemini(title: str, text: str) -> str:
     api_key = os.getenv("GEMINI_API_KEY")
@@ -153,11 +169,12 @@ def summarize_with_gemini(title: str, text: str) -> str:
     client = genai.Client(api_key=api_key)
 
     prompt = f"""
-以下の学術論文のテキスト本文を解析し、日本語で分かりやすく構造化要約を作成してください。
-最初に本文から正確な「論文タイトル」を読み取って記載してください。
+以下の学術論文のテキスト（抄録/概要）を解析し、日本語で分かりやすく構造化要約を作成してください。
+
+【論文タイトル】: {title}
 
 【要約フォーマット】:
-■ 論文タイトル (日本語訳および英語原題)
+■ 論文タイトル (日本語訳)
 ■ 一言概要 (1〜2行)
 ■ 研究の背景・課題
 ■ 提案手法・アプローチ
@@ -168,7 +185,7 @@ def summarize_with_gemini(title: str, text: str) -> str:
 """
 
     response = client.models.generate_content(
-        model="gemini-3.5-flash",
+        model="gemini-2.5-flash",
         contents=prompt,
     )
     return response.text
@@ -180,7 +197,7 @@ def summarize_with_gemini(title: str, text: str) -> str:
 def send_to_slack(session: str, url: str, summary: str) -> None:
     webhook_url = os.getenv("SLACK_WEBHOOK_URL")
     if not webhook_url:
-        print("[WARN] SLACK_WEBHOOK_URL 未設定。")
+        print("[WARN] SLACK_WEBHOOK_URL 未設定のため画面に要約を出力します:\n")
         print(summary)
         return
 
@@ -190,7 +207,7 @@ def send_to_slack(session: str, url: str, summary: str) -> None:
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
-                    "text": f"*📌 ACM Proceeding Paper*\n*🔗 Original URL:* {url}"
+                    "text": f"*📌 Session:* {session}\n*🔗 Original URL:* {url}"
                 }
             },
             {
@@ -216,42 +233,52 @@ def send_to_slack(session: str, url: str, summary: str) -> None:
 # ---------------------------------------------------------------------------
 def main():
     history = load_history()
-    papers = fetch_papers_list()
+    
+    co = ChromiumOptions()
+    co.auto_port()
+    page = ChromiumPage(co)
 
-    processed_count = 0
+    try:
+        papers = fetch_papers_list(page)
+        processed_count = 0
 
-    for paper in papers:
-        if processed_count >= MAX_DAILY_PAPERS:
-            print(f"[INFO] 本日の上限 ({MAX_DAILY_PAPERS}件) に達したため終了します。")
-            break
+        for paper in papers:
+            if processed_count >= MAX_DAILY_PAPERS:
+                print(f"[INFO] 本日の上限 ({MAX_DAILY_PAPERS}件) に達したため終了します。")
+                break
 
-        paper_id = paper["url"]
+            paper_id = paper["url"]
 
-        if paper_id in history:
-            continue
+            if paper_id in history:
+                continue
 
-        print(f"\n==========================================")
-        print(f"[処理開始 ({processed_count + 1}/{MAX_DAILY_PAPERS})]: {paper['url']}")
-        
-        pdf_text = extract_pdf_text(paper["url"])
-        if not pdf_text:
-            print(f"[SKIP] PDFを取得できなかったため（有料記事またはダウンロード制限）スキップします。")
-            continue
+            print(f"\n==========================================")
+            print(f"[処理開始 ({processed_count + 1}/{MAX_DAILY_PAPERS})]: {paper['title']}")
 
-        try:
-            summary = summarize_with_gemini(paper["title"], pdf_text)
-            send_to_slack(paper["session"], paper["url"], summary)
+            details = fetch_paper_details(page, paper["url"])
+            
+            paper_text = details["abstract"]
+            if not paper_text or len(paper_text.strip()) < 50:
+                print(f"[SKIP] テキスト(Abstract)が抽出できなかったためスキップします。")
+                continue
 
-            history.append(paper_id)
-            save_history(history)
-            processed_count += 1
+            try:
+                summary = summarize_with_gemini(paper["title"], paper_text)
+                send_to_slack(paper["session"], paper["url"], summary)
 
-            time.sleep(5)
+                history.append(paper_id)
+                save_history(history)
+                processed_count += 1
 
-        except Exception as e:
-            print(f"[ERROR] 処理中にエラーが発生しました: {e}")
+                time.sleep(3)
 
-    print(f"\n[INFO] 処理完了。本日新たに処理した論文数: {processed_count} 件")
+            except Exception as e:
+                print(f"[ERROR] 処理中にエラーが発生しました: {e}")
+
+        print(f"\n[INFO] 処理完了。本日新たに処理した論文数: {processed_count} 件")
+
+    finally:
+        page.quit()
 
 
 if __name__ == "__main__":
