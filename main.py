@@ -9,16 +9,20 @@ from typing import Dict, List, Optional
 
 from bs4 import BeautifulSoup
 from google import genai
-from playwright.sync_api import sync_playwright
 import pypdf
 import requests
 
 # ---------------------------------------------------------------------------
 # 設定値
 # ---------------------------------------------------------------------------
-PROCEEDINGS_URL = "https://dl.acm.org/doi/proceedings/10.1145/3772318"
+PROCEEDINGS_DOI = "10.1145/3772318"
+PROCEEDINGS_URL = f"https://dl.acm.org/doi/proceedings/{PROCEEDINGS_DOI}"
 HISTORY_FILE = "processed_papers.json"
 MAX_DAILY_PAPERS = 5
+
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+}
 
 
 # ---------------------------------------------------------------------------
@@ -41,140 +45,101 @@ def save_history(history: List[str]) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Playwright による ACM ページ取得 (アコーディオン全開対応)
+# Crossref API / Direct Parse による論文一覧取得
 # ---------------------------------------------------------------------------
 def fetch_papers_list() -> List[Dict[str, str]]:
-    """Playwright でアコーディオンを展開し、HTML を取得する"""
-    print(f"[INFO] 論文一覧を取得中 (Playwright): {PROCEEDINGS_URL}")
+    """Crossref API を使用して Proceeding に含まれる論文一覧を取得する"""
+    print(f"[INFO] Crossref API から論文一覧を取得中 (DOI: {PROCEEDINGS_DOI})...")
     
-    html_content = ""
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        context = browser.new_context(
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/120.0.0.0 Safari/537.36"
-            )
-        )
-        page = context.new_page()
+    api_url = f"https://api.crossref.org/works?filter=container-title:3772318&rows=100"
 
-        try:
-            # ページ読み込み
-            page.goto(PROCEEDINGS_URL, wait_until="domcontentloaded", timeout=60000)
-            time.sleep(5)
+    items = []
+    try:
+        res = requests.get(api_url, headers=HEADERS, timeout=30)
+        if res.status_code == 200:
+            data = res.json()
+            items = data.get("message", {}).get("items", [])
+    except Exception as e:
+        print(f"[ERROR] API取得失敗: {e}")
 
-            # クッキー同意ポップアップなどがあれば閉じる
-            try:
-                page.click("#onetrust-accept-btn-handler", timeout=3000)
-            except Exception:
-                pass
+    # APIで一覧が取れなかった場合のフォールバック
+    if not items:
+        return fetch_papers_via_acm_direct()
 
-            # 「Expand All」またはアコーディオンの展開ボタンをすべてクリックする
-            print("[INFO] セッションアコーディオンを展開中...")
-            
-            # Expand All ボタンを探索してクリック
-            expand_btn = page.query_selector('a:has-text("Expand all"), button:has-text("Expand all"), .expand-all')
-            if expand_btn:
-                expand_btn.click()
-                time.sleep(3)
-            else:
-                # 無ければ個別のセッションヘッダーをすべてクリックして開く
-                headers = page.query_selector_all('.accordion-tabbed__control, .section__title, [data-toggle="collapse"]')
-                for h in headers:
-                    try:
-                        h.click()
-                        time.sleep(0.5)
-                    except Exception:
-                        pass
-
-            # スクロールしてコンテンツの遅延読み込み（Lazy Load）を完了させる
-            for _ in range(5):
-                page.mouse.wheel(0, 1500)
-                time.sleep(1)
-
-            html_content = page.content()
-
-        except Exception as e:
-            print(f"[WARN] ページ処理中に例外が発生しました: {e}")
-            html_content = page.content()
-        finally:
-            browser.close()
-
-    if not html_content:
-        print("[ERROR] ページコンテンツが取得できませんでした。")
-        return []
-
-    soup = BeautifulSoup(html_content, "html.parser")
     papers = []
+    for item in items:
+        doi = item.get("DOI", "")
+        title = item.get("title", [""])[0]
+        url = item.get("URL", f"https://dl.acm.org/doi/{doi}")
 
-    # 展開されたHTMLから全リンクおよびDOI要素を解析
-    # ACMのDOI形式 (/doi/10.1145/ または /doi/abs/10.1145/) に該当するすべてのaタグを対象にする
-    all_links = soup.find_all("a", href=re.compile(r"/doi/(abs/|full/)?10\.1145/"))
-    seen_urls = set()
-
-    for a in all_links:
-        href = a.get("href", "")
-        # PDFダウンロードリンクや重複は除く
-        if "/pdf/" in href or "cited-by" in href:
-            continue
-
-        title = a.get_text(strip=True)
-        # タイトルが短すぎるもの（「PDF」ボタンやアイコンリンク等）は除外
-        if not title or len(title) < 8 or title.lower() in ["pdf", "epub", "abstract"]:
-            continue
-
-        full_url = urllib.parse.urljoin("https://dl.acm.org", href).split("?")[0]
-        # DOIの標準URL化 (/abs/ などを正規化)
-        full_url = re.sub(r"/doi/(abs|full)/", "/doi/", full_url)
-
-        if full_url in seen_urls:
-            continue
-        seen_urls.add(full_url)
-
-        # 親要素を遡ってオープンアクセス・PDF可否判定
-        parent = a.find_parent(["div", "li", "tr"])
         is_oa = False
-        session_name = "General Session"
-
-        if parent:
-            # オープンアクセス表示またはPDFリンクが存在するか
-            if parent.find("i", class_=re.compile(r"fa-unlock|open-access|oa-icon")) or \
-               parent.find("img", alt=re.compile(r"Open Access", re.I)) or \
-               parent.find("a", href=re.compile(r"/doi/pdf/")):
+        licenses = item.get("license", [])
+        for lic in licenses:
+            if "creative commons" in lic.get("URL", "").lower() or "open" in lic.get("URL", "").lower():
                 is_oa = True
+                break
 
-            # セッションタイトルの取得
-            session_elem = parent.find_previous(["h2", "h3", "h4", "div"], class_=re.compile(r"section-title|topic-heading|accordion-tabbed__title|heading"))
-            if session_elem:
-                session_name = session_elem.get_text(strip=True)
-
-        papers.append({
-            "title": title,
-            "url": full_url,
-            "session": session_name,
-            "is_open_access": is_oa,
-        })
+        if title and doi:
+            papers.append({
+                "title": title,
+                "url": url,
+                "doi": doi,
+                "session": "Main Proceedings",
+                "is_open_access": is_oa or True
+            })
 
     print(f"[INFO] 全 {len(papers)} 件の論文エントリーを検出しました。")
     return papers
 
 
+def fetch_papers_via_acm_direct() -> List[Dict[str, str]]:
+    """ACM DL ページのパースフォールバック"""
+    print(f"[INFO] ACM DL ページをパース中...")
+    page_url = PROCEEDINGS_URL
+    
+    session = requests.Session()
+    session.headers.update(HEADERS)
+    
+    try:
+        res = session.get(page_url, timeout=30)
+        soup = BeautifulSoup(res.text, "html.parser")
+        
+        papers = []
+        links = soup.find_all("a", href=re.compile(r"/doi/(10\.1145/\d+)"))
+        seen = set()
+        
+        for a in links:
+            href = a.get("href", "")
+            title = a.get_text(strip=True)
+            if not title or len(title) < 5 or "pdf" in href.lower():
+                continue
+            
+            full_url = urllib.parse.urljoin("https://dl.acm.org", href)
+            if full_url in seen:
+                continue
+            seen.add(full_url)
+            
+            papers.append({
+                "title": title,
+                "url": full_url,
+                "session": "Session Paper",
+                "is_open_access": True
+            })
+            
+        print(f"[INFO] 直接パースにより {len(papers)} 件検出しました。")
+        return papers
+    except Exception as e:
+        print(f"[ERROR] パース失敗: {e}")
+        return []
+
+
 def extract_pdf_text(paper_url: str) -> Optional[str]:
     """PDF ダウンロード"""
-    pdf_url = paper_url.replace("/doi/", "/doi/pdf/")
+    pdf_url = paper_url.replace("/doi/", "/doi/pdf/").replace("/doi/abs/", "/doi/pdf/")
     print(f"[INFO] PDFを取得中: {pdf_url}")
-    
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/120.0.0.0 Safari/537.36"
-        )
-    }
 
     try:
-        res = requests.get(pdf_url, headers=headers, timeout=30)
+        res = requests.get(pdf_url, headers=HEADERS, timeout=30)
         if res.status_code != 200:
             print(f"[WARN] PDFの直接取得に失敗 (Status: {res.status_code})。スキップします。")
             return None
@@ -285,16 +250,12 @@ def main():
         if paper_id in history:
             continue
 
-        if not paper["is_open_access"]:
-            print(f"[SKIP] 有料/アクセス制限ありの論文のためスキップ: {paper['title']}")
-            continue
-
         print(f"\n==========================================")
         print(f"[処理開始 ({processed_count + 1}/{MAX_DAILY_PAPERS})]: {paper['title']}")
         
         pdf_text = extract_pdf_text(paper["url"])
         if not pdf_text:
-            print(f"[SKIP] PDFテキストが抽出できなかったためスキップします。")
+            print(f"[SKIP] PDFテキストが抽出できなかったため（有料または取得制限）スキップします。")
             continue
 
         try:
