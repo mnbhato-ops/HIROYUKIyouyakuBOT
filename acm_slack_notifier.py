@@ -74,7 +74,7 @@ def fetch_paper_details_api(doi_suffix: int) -> Optional[Dict[str, str]]:
 
 
 # ---------------------------------------------------------------------------
-# Gemini API (前置き文章完全排除 & gemini-1.5-flash)
+# Gemini API (見出しクレンジング付き)
 # ---------------------------------------------------------------------------
 def summarize_with_gemini(title: str, text: str) -> str:
     api_key = os.getenv("GEMINI_API_KEY")
@@ -86,17 +86,25 @@ def summarize_with_gemini(title: str, text: str) -> str:
     prompt = f"""
 以下の学術論文のテキスト（抄録/概要）を解析し、日本語で構造化要約を作成してください。
 
-【注意指示】:
-「ご指定のフォーマットに従って〜」「提供された論文のアブストラクトを〜」といった挨拶文・前置き文・補足文章は一切出力しないでください。
-必ずいきなり「■ 一言概要」の行から出力を開始してください。
+【厳格な見出し指示】:
+・見出しには『■ 一言概要』『■ 研究の背景・課題』『■ 提案手法・アプローチ』『■ 主な結果・成果』のみを使用してください。
+・見出しの後ろに『(1〜2行)』などの補足やカッコ書きは絶対に付けないでください。
+・前置き文や挨拶文は一切出力せず、必ずいきなり「■ 一言概要」から始めてください。
 
 【論文タイトル】: {title}
 
 【要約フォーマット】:
-■ 一言概要 (1〜2行)
+■ 一言概要
+[概要を記入]
+
 ■ 研究の背景・課題
+[背景・課題を記入]
+
 ■ 提案手法・アプローチ
+[手法・アプローチを記入]
+
 ■ 主な結果・成果
+[結果・成果を記入]
 
 【論文テキスト】:
 {text[:12000]}
@@ -110,12 +118,18 @@ def summarize_with_gemini(title: str, text: str) -> str:
             )
             raw_text = response.text.strip()
             
-            # 前置き文言をプログラム側でも強制除去
+            # 前置き文言の完全除去
             if "■" in raw_text:
                 cleaned_text = "■" + raw_text.split("■", 1)[1]
             else:
                 cleaned_text = raw_text
-                
+
+            # 見出しの後ろについた (1〜2行) などの補足カッコ文字を正規表現で強制排除
+            cleaned_text = re.sub(r"■\s*一言概要\s*[\(（][^\)）]*[\)）]", "■ 一言概要", cleaned_text)
+            cleaned_text = re.sub(r"■\s*研究の背景・課題\s*[\(（][^\)）]*[\)）]", "■ 研究の背景・課題", cleaned_text)
+            cleaned_text = re.sub(r"■\s*提案手法・アプローチ\s*[\(（][^\)）]*[\)）]", "■ 提案手法・アプローチ", cleaned_text)
+            cleaned_text = re.sub(r"■\s*主な結果・成果\s*[\(（][^\)）]*[\)）]", "■ 主な結果・成果", cleaned_text)
+
             return cleaned_text.strip()
             
         except Exception as e:
@@ -137,7 +151,6 @@ def summarize_with_gemini(title: str, text: str) -> str:
 def send_to_slack(current_paper_num: int, total_count: int, url: str, title: str, authors: str, summary: str) -> None:
     webhook_url = os.getenv("SLACK_WEBHOOK_URL")
     
-    # ご指定通りのヘッダーフォーマット (Session削除、Title(EN)->Title、5本 / 1701本)
     header_text = (
         f"*📌 順番:* {current_paper_num}本 / {total_count}本\n"
         f"*📄 Title:* {title}\n"
