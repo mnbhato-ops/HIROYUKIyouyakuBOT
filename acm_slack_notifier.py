@@ -43,7 +43,7 @@ def save_history(history: List[str]) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 学術API (Semantic Scholar) による高速・軽量データ取得 (ブラウザ不要)
+# 学術API (Semantic Scholar) による高速・軽量データ取得
 # ---------------------------------------------------------------------------
 def fetch_paper_details_api(doi_suffix: str) -> Optional[Dict[str, str]]:
     """API 経由でタイトル、著者名、Abstract を高速取得する"""
@@ -78,7 +78,7 @@ def fetch_paper_details_api(doi_suffix: str) -> Optional[Dict[str, str]]:
 
 
 # ---------------------------------------------------------------------------
-# Gemini API (gemini-2.5-flash / 自動リトライ付き)
+# Gemini API (gemini-1.5-flash / 超軽量・高速モデル)
 # ---------------------------------------------------------------------------
 def summarize_with_gemini(title: str, text: str) -> str:
     api_key = os.getenv("GEMINI_API_KEY")
@@ -102,7 +102,7 @@ def summarize_with_gemini(title: str, text: str) -> str:
 {text[:12000]}
 """
 
-    for attempt in range(3):
+    for attempt in range(2):
         try:
             response = client.models.generate_content(
                 model="gemini-3.5-flash",
@@ -111,12 +111,15 @@ def summarize_with_gemini(title: str, text: str) -> str:
             return response.text
         except Exception as e:
             if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
-                print(f"[WARN] Gemini API レート制限(429)を検知。30秒待機してリトライします... ({attempt + 1}/3)")
-                time.sleep(30)
+                if attempt == 0:
+                    print(f"[WARN] Gemini API レート制限(429)を検知。5秒後に1回再試行します...")
+                    time.sleep(5)
+                else:
+                    raise RuntimeError("Gemini API の利用上限(Quota)に達しました。")
             else:
                 raise e
 
-    raise RuntimeError("Gemini API のリトライ上限に達しました。")
+    raise RuntimeError("Gemini API 呼び出しに失敗しました。")
 
 
 # ---------------------------------------------------------------------------
@@ -201,8 +204,7 @@ def main():
             save_history(history)
             processed_count += 1
 
-            # API レート制限回避のため 6秒待機
-            time.sleep(6)
+            time.sleep(2)
 
         except Exception as e:
             print(f"[ERROR] 処理中にエラーが発生しました: {e}")
