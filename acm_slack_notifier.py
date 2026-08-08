@@ -48,14 +48,19 @@ def fetch_papers_list(page: ChromiumPage) -> List[Dict[str, str]]:
     
     page.get(PROCEEDINGS_URL)
     
-    # Cloudflare 通過待機 (最大 15 秒)
-    for i in range(15):
-        if "Just a moment" in page.title or "しばらく" in page.title:
-            time.sleep(1)
-        else:
+    # Cloudflare 通過待機 (最大 45 秒間しっかり待機)
+    print("[INFO] Cloudflare セキュリティ判定の通過を待機中...")
+    cf_cleared = False
+    for i in range(45):
+        title = page.title
+        if "Just a moment" not in title and "しばらく" not in title and title:
+            print(f"[INFO] Cloudflare クリア成功 ({i+1}秒): {title}")
+            cf_cleared = True
             break
+        time.sleep(1)
 
-    print(f"[INFO] ページ読み込み完了: {page.title}")
+    if not cf_cleared:
+        print(f"[WARN] Cloudflare 判定の通過タイムアウト (最終タイトル: {page.title})")
 
     # クッキー同意ポップアップを閉じる
     try:
@@ -65,30 +70,31 @@ def fetch_papers_list(page: ChromiumPage) -> List[Dict[str, str]]:
     except Exception:
         pass
 
-    # スクロール
+    # スクロールして遅延読み込みを完了させる
     for _ in range(3):
         page.scroll.down(1000)
         time.sleep(1)
 
-    # アコーディオンを展開
+    # アコーディオンを全展開
     print("[INFO] セッションアコーディオンを展開中...")
     try:
         expand_btn = page.ele('text:Expand all', timeout=3)
         if expand_btn:
             expand_btn.click()
-            time.sleep(3)
+            time.sleep(4)
         else:
             headers = page.eles('.accordion-tabbed__control')
+            print(f"[INFO] {len(headers)} 個のセッションヘッダーを個別に展開します...")
             for h in headers:
                 try:
                     h.click()
                     time.sleep(0.3)
                 except Exception:
                     pass
+            time.sleep(3)
     except Exception as e:
         print(f"[WARN] アコーディオン展開スキップ: {e}")
 
-    time.sleep(2)
     html_content = page.html
     soup = BeautifulSoup(html_content, "html.parser")
     
