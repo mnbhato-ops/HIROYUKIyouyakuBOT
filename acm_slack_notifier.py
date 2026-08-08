@@ -109,7 +109,7 @@ def fetch_papers_list(page: ChromiumPage) -> List[Dict[str, str]]:
             continue
 
         full_url = urllib.parse.urljoin("https://dl.acm.org", href).split("?")[0]
-        full_url = re.sub(r"/doi/(abs|full)/", "/doi/", full_url)
+        full_url = re.sub(r"/doi/(abs/|full/)", "/doi/", full_url)
 
         if full_url in seen_urls:
             continue
@@ -131,16 +131,16 @@ def fetch_papers_list(page: ChromiumPage) -> List[Dict[str, str]]:
 
 
 # ---------------------------------------------------------------------------
-# Semantic Scholar API による Abstract 補完フォールバック
+# Semantic Scholar API による Abstract & Authors 取得
 # ---------------------------------------------------------------------------
 def fetch_paper_details_api(paper_url: str) -> Optional[Dict[str, str]]:
-    """Semantic Scholar API を使って Cloudflare を回避し Abstract を取得する"""
+    """Semantic Scholar API を使って Abstract と Authors を取得する"""
     match = re.search(r"10\.1145/\d+\.\d+", paper_url)
     if not match:
         return None
     
     doi = match.group(0)
-    api_url = f"https://api.semanticscholar.org/graph/v1/paper/{doi}?fields=title,abstract,url,venue"
+    api_url = f"https://api.semanticscholar.org/graph/v1/paper/{doi}?fields=title,abstract,url,venue,authors"
     headers = {"User-Agent": "AcademicPaperNotifier/1.0"}
 
     try:
@@ -150,11 +150,16 @@ def fetch_paper_details_api(paper_url: str) -> Optional[Dict[str, str]]:
             title = data.get("title") or ""
             abstract = data.get("abstract") or ""
             venue = data.get("venue") or "General Session"
+            raw_authors = data.get("authors", [])
+            authors = [a.get("name") for a in raw_authors if a.get("name")]
+            authors_str = ", ".join(authors) if authors else ""
+            
             if abstract:
                 return {
                     "title": title,
                     "abstract": abstract,
                     "session": venue,
+                    "authors": authors_str,
                     "url": paper_url
                 }
     except Exception as e:
@@ -163,37 +168,69 @@ def fetch_paper_details_api(paper_url: str) -> Optional[Dict[str, str]]:
 
 
 def fetch_paper_details(page: ChromiumPage, paper_url: str) -> Dict[str, Optional[str]]:
-    """論文詳細ページから Abstract を取得 (Webスクレイピング ＋ API フォールバック)"""
+    """論文詳細ページから Abstract・著者名・Figure 1 画像URL を取得"""
     print(f"[INFO] 論文詳細情報を取得中: {paper_url}")
     
-    # 1. API で取得を試みる (Cloudflare 回避・高速)
+    # 1. API でタイトル・Abstract・著者名を取得
     api_data = fetch_paper_details_api(paper_url)
-    if api_data and api_data.get("abstract"):
-        print(f"[INFO] API経由で Abstract の取得に成功しました ({len(api_data['abstract'])} 文字)")
-        return {
-            "abstract": api_data["abstract"],
-            "title": api_data["title"]
-        }
+    
+    # 2. ブラウザで ACM DL 論文個別ページから Figure 1 (メイン図表) 画像 URL と著者名を補完取得
+    figure_url = None
+    page_authors = ""
+    abstract_text = api_data.get("abstract") if api_data else ""
+    paper_title = api_data.get("title") if api_data else None
 
-    # 2. ブラウザ経由での取得
-    page.get(paper_url)
-    for i in range(15):
-        if "Just a moment" in page.title or "しばらく" in page.title:
-            time.sleep(1)
-        else:
-            break
+    try:
+        page.get(paper_url)
+        for i in range(10):
+            if "Just a moment" in page.title or "しばらく" in page.title:
+                time.sleep(1)
+            else:
+                break
 
-    html = page.html
-    soup = BeautifulSoup(html, "html.parser")
+        html = page.html
+        soup = BeautifulSoup(html, "html.parser")
 
-    abstract_elem = soup.find(class_=re.compile(r"abstractSection|abstractInFull|abstract-content")) or \
-                    soup.find("section", id="abstract") or \
-                    soup.find("div", class_=re.compile(r"abstract"))
-    abstract_text = abstract_elem.get_text(strip=True) if abstract_elem else ""
+        # Abstract が API で取れなかった場合ブラウザから抽出
+        if not abstract_text:
+            abstract_elem = soup.find(class_=re.compile(r"abstractSection|abstractInFull|abstract-content")) or \
+                            soup.find("section", id="abstract") or \
+                            soup.find("div", class_=re.compile(r"abstract"))
+            abstract_text = abstract_elem.get_text(strip=True) if abstract_elem else ""
+
+        # 著者名が API で取れなかった場合ブラウザから抽出
+        if not (api_data and api_data.get("authors")):
+            authors_elems = soup.find_all(class_=re.compile(r"author-name|author|given-name"))
+            if authors_elems:
+                names = [a.get_text(strip=True) for a in authors_elems if len(a.get_text(strip=True)) > 2]
+                page_authors = ", ".join(dict.fromkeys(names))
+
+        # Figure 1 / メインティーザー画像の抽出
+        fig_tags = soup.find_all(["figure", "div"], class_=re.compile(r"figure|teaser|graphical-abstract|article-figure", re.I))
+        for ft in fig_tags:
+            img = ft.find("img")
+            if img and img.get("src"):
+                src = img.get("src")
+                figure_url = "https://dl.acm.org" + src if src.startswith("/") else src
+                break
+
+        if not figure_url:
+            for img in soup.find_all("img"):
+                src = img.get("src", "")
+                if "/cms/10.1145/" in src or "/cms/attachment/" in src or "fig1" in src.lower() or "downloadFigures" in src:
+                    figure_url = "https://dl.acm.org" + src if src.startswith("/") else src
+                    break
+
+    except Exception as e:
+        print(f"[WARN] ブラウザでの詳細取得中にエラー (スキップして続行): {e}")
+
+    authors_final = (api_data.get("authors") if api_data and api_data.get("authors") else page_authors) or "Authors Unknown"
 
     return {
+        "title": paper_title,
         "abstract": abstract_text,
-        "title": None
+        "authors": authors_final,
+        "figure_url": figure_url
     }
 
 
@@ -213,7 +250,6 @@ def summarize_with_gemini(title: str, text: str) -> str:
 【論文タイトル】: {title}
 
 【要約フォーマット】:
-■ 論文タイトル (日本語訳)
 ■ 一言概要 (1〜2行)
 ■ 研究の背景・課題
 ■ 提案手法・アプローチ
@@ -233,36 +269,51 @@ def summarize_with_gemini(title: str, text: str) -> str:
 # ---------------------------------------------------------------------------
 # Slack 通知
 # ---------------------------------------------------------------------------
-def send_to_slack(session: str, url: str, summary: str) -> None:
+def send_to_slack(session: str, url: str, title_en: str, authors_en: str, figure_url: Optional[str], summary: str) -> None:
     webhook_url = os.getenv("SLACK_WEBHOOK_URL")
+    
+    header_text = f"*📌 Session:* {session}\n*📄 Title (EN):* {title_en}\n*👥 Authors:* {authors_en}\n*🔗 URL:* {url}"
+
     if not webhook_url:
         print("[WARN] SLACK_WEBHOOK_URL 未設定のため画面に要約を出力します:\n")
-        print(summary)
+        print(header_text)
+        if figure_url:
+            print(f"🖼️ Figure Image URL: {figure_url}")
+        print("\n" + summary)
         return
 
-    payload = {
-        "blocks": [
-            {
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": f"*📌 Session:* {session}\n*🔗 Original URL:* {url}"
-                }
-            },
-            {
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": summary
-                }
-            },
-            {"type": "divider"}
-        ]
-    }
+    blocks = [
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": header_text
+            }
+        }
+    ]
+
+    # 画像が存在すれば Slack Block Kit の image ブロックを挿入
+    if figure_url:
+        blocks.append({
+            "type": "image",
+            "image_url": figure_url,
+            "alt_text": f"Figure 1 of {title_en[:30]}"
+        })
+
+    blocks.append({
+        "type": "section",
+        "text": {
+            "type": "mrkdwn",
+            "text": summary
+        }
+    })
+    blocks.append({"type": "divider"})
+
+    payload = {"blocks": blocks}
 
     res = requests.post(webhook_url, json=payload)
     if res.status_code == 200:
-        print("[INFO] Slackへの送信が完了しました。")
+        print("[INFO] Slackへの送信が完了しました (タイトル/著者/画像付き)。")
     else:
         print(f"[ERROR] Slack送信エラー: {res.status_code} - {res.text}")
 
@@ -292,7 +343,7 @@ def main():
     try:
         papers = fetch_papers_list(page)
         
-        # もし Webスクレイピングが Cloudflare で0件となった場合、API経由でACM CHI論文リストを自動ロード
+        # もし Webスクレイピングが Cloudflare で0件となった場合、サンプルDOIリストから自動でロード
         if not papers:
             print("[INFO] Webスクレイピングがブロックされたため、API経由で論文リストを自動ロードします...")
             sample_doi_suffixes = [
@@ -324,7 +375,9 @@ def main():
 
             details = fetch_paper_details(page, paper["url"])
             
-            paper_title = details.get("title") or paper["title"]
+            paper_title_en = details.get("title") or paper["title"]
+            paper_authors_en = details.get("authors") or "Authors Unknown"
+            figure_url = details.get("figure_url")
             paper_text = details.get("abstract")
             
             if not paper_text or len(paper_text.strip()) < 50:
@@ -332,8 +385,15 @@ def main():
                 continue
 
             try:
-                summary = summarize_with_gemini(paper_title, paper_text)
-                send_to_slack(paper["session"], paper["url"], summary)
+                summary = summarize_with_gemini(paper_title_en, paper_text)
+                send_to_slack(
+                    session=paper["session"],
+                    url=paper["url"],
+                    title_en=paper_title_en,
+                    authors_en=paper_authors_en,
+                    figure_url=figure_url,
+                    summary=summary
+                )
 
                 history.append(paper_id)
                 save_history(history)
