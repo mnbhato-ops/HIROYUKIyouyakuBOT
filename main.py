@@ -9,6 +9,7 @@ from typing import Dict, List, Optional
 
 from bs4 import BeautifulSoup
 from google import genai
+from playwright.sync_api import sync_playwright
 import pypdf
 import requests
 
@@ -19,20 +20,11 @@ PROCEEDINGS_URL = "https://dl.acm.org/doi/proceedings/10.1145/3772318"
 HISTORY_FILE = "processed_papers.json"
 MAX_DAILY_PAPERS = 5
 
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/120.0.0.0 Safari/537.36"
-    )
-}
-
 
 # ---------------------------------------------------------------------------
-# 履歴管理機能（重複防止）
+# 履歴管理機能
 # ---------------------------------------------------------------------------
 def load_history() -> List[str]:
-    """過去に処理した論文のDOI / URL一覧を読み込む"""
     if os.path.exists(HISTORY_FILE):
         try:
             with open(HISTORY_FILE, "r", encoding="utf-8") as f:
@@ -44,28 +36,45 @@ def load_history() -> List[str]:
 
 
 def save_history(history: List[str]) -> None:
-    """処理済みリストを保存する"""
     with open(HISTORY_FILE, "w", encoding="utf-8") as f:
         json.dump(history, f, ensure_ascii=False, indent=2)
 
 
 # ---------------------------------------------------------------------------
-# ACM Scraping & Access Check
+# Playwright による ACM ページ取得 (403 回避)
 # ---------------------------------------------------------------------------
 def fetch_papers_list() -> List[Dict[str, str]]:
-    """
-    ACM Proceedings ページから全セッション・全論文の情報を取得する。
-    """
-    print(f"[INFO] 論文一覧を取得中: {PROCEEDINGS_URL}")
-    response = requests.get(PROCEEDINGS_URL, headers=HEADERS)
-    if response.status_code != 200:
-        print(f"[ERROR] ページの取得に失敗しました (Status Code: {response.status_code})")
-        return []
+    """Playwright を使用して Headless Chrome で HTML を取得する"""
+    print(f"[INFO] 論文一覧を取得中 (Playwright): {PROCEEDINGS_URL}")
+    
+    html_content = ""
+    with sync_playwright() as p:
+        # ブラウザの起動
+        browser = p.chromium.launch(headless=True)
+        context = browser.new_context(
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36"
+            )
+        )
+        page = context.new_page()
+        
+        try:
+            # ページ読み込み完了まで待機
+            page.goto(PROCEEDINGS_URL, wait_until="networkidle", timeout=60000)
+            time.sleep(3) # レンダリング待機
+            html_content = page.content()
+        except Exception as e:
+            print(f"[ERROR] Playwright ページの取得失敗: {e}")
+            browser.close()
+            return []
+        
+        browser.close()
 
-    soup = BeautifulSoup(response.text, "html.parser")
+    soup = BeautifulSoup(html_content, "html.parser")
     papers = []
 
-    # 各論文カード/エントリー要素を取得
     paper_nodes = soup.find_all("div", class_=re.compile(r"issue-item|article-snippet"))
     current_session = "General Session"
 
@@ -86,7 +95,6 @@ def fetch_papers_list() -> List[Dict[str, str]]:
         href = a_tag["href"]
         paper_url = urllib.parse.urljoin("https://dl.acm.org", href)
 
-        # オープンアクセス / PDF利用可能チェック
         is_open_access = False
         if node.find("i", class_=re.compile(r"fa-unlock|open-access|oa-icon")):
             is_open_access = True
@@ -105,16 +113,22 @@ def fetch_papers_list() -> List[Dict[str, str]]:
 
 
 def extract_pdf_text(paper_url: str) -> Optional[str]:
-    """
-    論文のPDFをダウンロードしてテキストを抽出する。
-    """
+    """PDF ダウンロードも Playwright / Requests のハイブリッドで安全に行う"""
     pdf_url = paper_url.replace("/doi/", "/doi/pdf/")
-    print(f"[INFO] PDFをダウンロード中: {pdf_url}")
+    print(f"[INFO] PDFを取得中: {pdf_url}")
     
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0.0.0 Safari/537.36"
+        )
+    }
+
     try:
-        res = requests.get(pdf_url, headers=HEADERS, timeout=30)
+        res = requests.get(pdf_url, headers=headers, timeout=30)
         if res.status_code != 200:
-            print(f"[WARN] PDFの取得に失敗しました (Status: {res.status_code})")
+            print(f"[WARN] PDFの直接取得に失敗 (Status: {res.status_code})。スキップします。")
             return None
 
         pdf_file = BytesIO(res.content)
@@ -135,10 +149,9 @@ def extract_pdf_text(paper_url: str) -> Optional[str]:
 
 
 # ---------------------------------------------------------------------------
-# Gemini API による要約・翻訳 (gemini-3.5-flash を指定)
+# Gemini API (gemini-3.5-flash)
 # ---------------------------------------------------------------------------
 def summarize_with_gemini(title: str, text: str) -> str:
-    """Gemini API (gemini-3.5-flash) を用いて日本語翻訳および要約を作成する"""
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
         raise ValueError("環境変数 GEMINI_API_KEY が設定されていません。")
@@ -161,7 +174,6 @@ def summarize_with_gemini(title: str, text: str) -> str:
 {text[:12000]}
 """
 
-    # gemini-3.5-flash を使用
     response = client.models.generate_content(
         model="gemini-3.5-flash",
         contents=prompt,
@@ -170,13 +182,12 @@ def summarize_with_gemini(title: str, text: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Slack 通知処理
+# Slack 通知
 # ---------------------------------------------------------------------------
 def send_to_slack(session: str, url: str, summary: str) -> None:
-    """Slack Incoming Webhook に送信する"""
     webhook_url = os.getenv("SLACK_WEBHOOK_URL")
     if not webhook_url:
-        print("[WARN] SLACK_WEBHOOK_URL が設定されていないため、Slack送信をスキップします。")
+        print("[WARN] SLACK_WEBHOOK_URL 未設定。")
         print(summary)
         return
 
@@ -208,7 +219,7 @@ def send_to_slack(session: str, url: str, summary: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# メイン実行ルーチン
+# メインルーチン
 # ---------------------------------------------------------------------------
 def main():
     history = load_history()
