@@ -41,7 +41,7 @@ def save_history(history: List[str]) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Playwright による ACM ページ取得 (403 回避)
+# Playwright による ACM ページ取得 (タイムアウト対策版)
 # ---------------------------------------------------------------------------
 def fetch_papers_list() -> List[Dict[str, str]]:
     """Playwright を使用して Headless Chrome で HTML を取得する"""
@@ -49,7 +49,6 @@ def fetch_papers_list() -> List[Dict[str, str]]:
     
     html_content = ""
     with sync_playwright() as p:
-        # ブラウザの起動
         browser = p.chromium.launch(headless=True)
         context = browser.new_context(
             user_agent=(
@@ -59,11 +58,16 @@ def fetch_papers_list() -> List[Dict[str, str]]:
             )
         )
         page = context.new_page()
-        
+
+        # 不要なリソース（画像、フォント、スタイルシート）をブロックして高速化
+        page.route("**/*.{png,jpg,jpeg,svg,gif,css,woff,woff2}", lambda route: route.abort())
+
         try:
-            # ページ読み込み完了まで待機
-            page.goto(PROCEEDINGS_URL, wait_until="networkidle", timeout=60000)
-            time.sleep(3) # レンダリング待機
+            # networkidle ではなく domcontentloaded に変更（高速・タイムアウト防止）
+            page.goto(PROCEEDINGS_URL, wait_until="domcontentloaded", timeout=60000)
+            
+            # DOM展開・JavaScript描画の待機（3秒）
+            time.sleep(3)
             html_content = page.content()
         except Exception as e:
             print(f"[ERROR] Playwright ページの取得失敗: {e}")
@@ -113,7 +117,7 @@ def fetch_papers_list() -> List[Dict[str, str]]:
 
 
 def extract_pdf_text(paper_url: str) -> Optional[str]:
-    """PDF ダウンロードも Playwright / Requests のハイブリッドで安全に行う"""
+    """PDF ダウンロード"""
     pdf_url = paper_url.replace("/doi/", "/doi/pdf/")
     print(f"[INFO] PDFを取得中: {pdf_url}")
     
