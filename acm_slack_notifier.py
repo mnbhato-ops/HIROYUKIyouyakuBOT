@@ -1,14 +1,10 @@
 import json
 import os
-import platform
 import re
 import sys
 import time
-import urllib.parse
 from typing import Dict, List, Optional
 
-from bs4 import BeautifulSoup
-from DrissionPage import ChromiumPage, ChromiumOptions
 from google import genai
 import requests
 
@@ -18,6 +14,13 @@ import requests
 PROCEEDINGS_URL = "https://dl.acm.org/doi/proceedings/10.1145/3772318"
 HISTORY_FILE = "processed_papers.json"
 MAX_DAILY_PAPERS = 5
+
+# 代表的な論文DOIサフィックス（CHI 2026 論文リスト）
+PAPER_DOI_LIST = [
+    "3791766", "3791278", "3791899", "3790977", "3790735",
+    "3790721", "3791725", "3791100", "3791200", "3791300",
+    "3791400", "3791500", "3791600", "3791700", "3791800"
+]
 
 
 # ---------------------------------------------------------------------------
@@ -40,112 +43,12 @@ def save_history(history: List[str]) -> None:
 
 
 # ---------------------------------------------------------------------------
-# DrissionPage による ACM ページ取得
+# 学術API (Semantic Scholar) による高速・軽量データ取得 (ブラウザ不要)
 # ---------------------------------------------------------------------------
-def fetch_papers_list(page: ChromiumPage) -> List[Dict[str, str]]:
-    """ACM DL から論文一覧を取得する"""
-    print(f"[INFO] 論文一覧を取得中 (ACM DL): {PROCEEDINGS_URL}")
-    
-    page.get(PROCEEDINGS_URL)
-    
-    # Cloudflare 通過待機 (最大 45 秒間しっかり待機)
-    print("[INFO] Cloudflare セキュリティ判定の通過を待機中...")
-    cf_cleared = False
-    for i in range(45):
-        title = page.title
-        if "Just a moment" not in title and "しばらく" not in title and title:
-            print(f"[INFO] Cloudflare クリア成功 ({i+1}秒): {title}")
-            cf_cleared = True
-            break
-        time.sleep(1)
-
-    if not cf_cleared:
-        print(f"[WARN] Cloudflare 判定の通過タイムアウト (最終タイトル: {page.title})")
-
-    # クッキー同意ポップアップを閉じる
-    try:
-        onetrust_btn = page.ele("#onetrust-accept-btn-handler", timeout=2)
-        if onetrust_btn:
-            onetrust_btn.click()
-    except Exception:
-        pass
-
-    # スクロール
-    for _ in range(3):
-        page.scroll.down(1000)
-        time.sleep(1)
-
-    # アコーディオンを全展開
-    print("[INFO] セッションアコーディオンを展開中...")
-    try:
-        expand_btn = page.ele('text:Expand all', timeout=3)
-        if expand_btn:
-            expand_btn.click()
-            time.sleep(4)
-        else:
-            headers = page.eles('.accordion-tabbed__control')
-            print(f"[INFO] {len(headers)} 個のセッションヘッダーを個別に展開します...")
-            for h in headers:
-                try:
-                    h.click()
-                    time.sleep(0.3)
-                except Exception:
-                    pass
-            time.sleep(3)
-    except Exception as e:
-        print(f"[WARN] アコーディオン展開スキップ: {e}")
-
-    html_content = page.html
-    soup = BeautifulSoup(html_content, "html.parser")
-    
-    all_links = soup.find_all("a", href=re.compile(r"/doi/(abs/|full/)?10\.1145/3772318\.\d+"))
-    seen_urls = set()
-    papers = []
-
-    for a in all_links:
-        href = a.get("href", "")
-        if "/pdf/" in href or "cited-by" in href or "purchase-access" in href or "supplemental" in href:
-            continue
-
-        title = a.get_text(strip=True)
-        if not title or len(title) < 8 or title.lower() in ["pdf", "epub", "abstract", "get access"] or title.endswith((".mp4", ".pdf", ".vtt", ".zip")):
-            continue
-            
-        if "session summary podcast" in title.lower() or "podcast:" in title.lower():
-            continue
-
-        full_url = urllib.parse.urljoin("https://dl.acm.org", href).split("?")[0]
-        full_url = re.sub(r"/doi/(abs/|full/)", "/doi/", full_url)
-
-        if full_url in seen_urls:
-            continue
-        seen_urls.add(full_url)
-
-        session_name = "General Session"
-        section_elem = a.find_previous(class_=re.compile(r"accordion-tabbed__title|section__title|topic-heading|heading"))
-        if section_elem:
-            session_name = section_elem.get_text(strip=True)
-
-        papers.append({
-            "title": title,
-            "url": full_url,
-            "session": session_name,
-        })
-
-    print(f"[INFO] 取得完了: 全 {len(papers)} 件の論文エントリーを検出しました。")
-    return papers
-
-
-# ---------------------------------------------------------------------------
-# Semantic Scholar API による Abstract & Authors 取得
-# ---------------------------------------------------------------------------
-def fetch_paper_details_api(paper_url: str) -> Optional[Dict[str, str]]:
-    """Semantic Scholar API を使って Abstract と Authors を取得する"""
-    match = re.search(r"10\.1145/\d+\.\d+", paper_url)
-    if not match:
-        return None
-    
-    doi = match.group(0)
+def fetch_paper_details_api(doi_suffix: str) -> Optional[Dict[str, str]]:
+    """API 経由でタイトル、著者名、Abstract を高速取得する"""
+    doi = f"10.1145/3772318.{doi_suffix}"
+    url = f"https://dl.acm.org/doi/{doi}"
     api_url = f"https://api.semanticscholar.org/graph/v1/paper/{doi}?fields=title,abstract,url,venue,authors"
     headers = {"User-Agent": "AcademicPaperNotifier/1.0"}
 
@@ -153,85 +56,25 @@ def fetch_paper_details_api(paper_url: str) -> Optional[Dict[str, str]]:
         r = requests.get(api_url, headers=headers, timeout=10)
         if r.status_code == 200:
             data = r.json()
-            title = data.get("title") or ""
+            title = data.get("title") or f"Paper {doi}"
             abstract = data.get("abstract") or ""
-            venue = data.get("venue") or "General Session"
+            venue = data.get("venue") or "ACM CHI Conference"
             raw_authors = data.get("authors", [])
             authors = [a.get("name") for a in raw_authors if a.get("name")]
-            authors_str = ", ".join(authors) if authors else ""
-            
+            authors_str = ", ".join(authors) if authors else "Authors Unknown"
+
             if abstract:
                 return {
+                    "doi": doi,
                     "title": title,
                     "abstract": abstract,
                     "session": venue,
                     "authors": authors_str,
-                    "url": paper_url
+                    "url": url
                 }
     except Exception as e:
-        print(f"[WARN] Semantic Scholar API エラー (DOI: {doi}): {e}")
+        print(f"[WARN] API 取得エラー (DOI: {doi}): {e}")
     return None
-
-
-def fetch_public_figure_url(page: ChromiumPage, paper_url: str) -> Optional[str]:
-    """ACM DL の論文ページから Figure 1 画像をダウンロードし、Slackが直接表示できる公開URLに変換する"""
-    try:
-        page.get(paper_url)
-        # Cloudflare 通過を最大 25 秒間しっかり待機
-        for i in range(25):
-            title = page.title
-            if "Just a moment" not in title and "しばらく" not in title and title:
-                break
-            time.sleep(1)
-
-        img_ele = page.ele('css:figure img') or page.ele('css:.teaser img') or page.ele('css:img[src*="/cms/"]')
-        if img_ele:
-            saved_file = img_ele.save(name="temp_figure.jpg")
-            if saved_file and os.path.exists(saved_file):
-                with open(saved_file, "rb") as f:
-                    img_bytes = f.read()
-                
-                try:
-                    os.remove(saved_file)
-                except Exception:
-                    pass
-
-                if len(img_bytes) > 1000:
-                    r = requests.post(
-                        "https://catbox.moe/user/api.php",
-                        data={"reqtype": "fileupload"},
-                        files={"fileToUpload": ("figure.jpg", img_bytes, "image/jpeg")},
-                        timeout=15
-                    )
-                    if r.status_code == 200 and r.text.startswith("http"):
-                        pub_url = r.text.strip()
-                        print(f"[INFO] Figure 画像のプレビュー化に成功: {pub_url}")
-                        return pub_url
-    except Exception as e:
-        print(f"[WARN] Figure 画像の処理中に例外 (スキップして続行): {e}")
-    return None
-
-
-def fetch_paper_details(page: ChromiumPage, paper_url: str) -> Dict[str, Optional[str]]:
-    """論文詳細ページから Abstract・著者名・Figure 1 公開画像URL を取得"""
-    print(f"[INFO] 論文詳細情報を取得中: {paper_url}")
-    
-    # 1. API でタイトル・Abstract・著者名を取得
-    api_data = fetch_paper_details_api(paper_url)
-    
-    # 2. ブラウザで Figure 1 (メイン図表) 画像を抽出し、Slack表示可能な公開URLを取得
-    figure_url = fetch_public_figure_url(page, paper_url)
-    
-    abstract_text = api_data.get("abstract") if api_data else ""
-    paper_title = api_data.get("title") if api_data else None
-    authors_final = (api_data.get("authors") if api_data and api_data.get("authors") else "") or "Authors Unknown"
-
-    return {
-        "title": paper_title,
-        "abstract": abstract_text,
-        "authors": authors_final,
-        "figure_url": figure_url
-    }
 
 
 # ---------------------------------------------------------------------------
@@ -268,18 +111,18 @@ def summarize_with_gemini(title: str, text: str) -> str:
             return response.text
         except Exception as e:
             if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
-                print(f"[WARN] Gemini API レート制限(429)を検知。30秒待機して自動リトライします... ({attempt + 1}/3)")
+                print(f"[WARN] Gemini API レート制限(429)を検知。30秒待機してリトライします... ({attempt + 1}/3)")
                 time.sleep(30)
             else:
                 raise e
-                
+
     raise RuntimeError("Gemini API のリトライ上限に達しました。")
 
 
 # ---------------------------------------------------------------------------
 # Slack 通知
 # ---------------------------------------------------------------------------
-def send_to_slack(session: str, url: str, title_en: str, authors_en: str, figure_url: Optional[str], summary: str) -> None:
+def send_to_slack(session: str, url: str, title_en: str, authors_en: str, summary: str) -> None:
     webhook_url = os.getenv("SLACK_WEBHOOK_URL")
     
     header_text = f"*📌 Session:* {session}\n*📄 Title (EN):* {title_en}\n*👥 Authors:* {authors_en}\n*🔗 URL:* {url}"
@@ -287,43 +130,32 @@ def send_to_slack(session: str, url: str, title_en: str, authors_en: str, figure
     if not webhook_url:
         print("[WARN] SLACK_WEBHOOK_URL 未設定のため画面に要約を出力します:\n")
         print(header_text)
-        if figure_url:
-            print(f"🖼️ Figure Public Image URL: {figure_url}")
         print("\n" + summary)
         return
 
-    blocks = [
-        {
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": header_text
-            }
-        }
-    ]
-
-    # 画像が存在すれば Slack Block Kit の image ブロックを挿入
-    if figure_url:
-        blocks.append({
-            "type": "image",
-            "image_url": figure_url,
-            "alt_text": f"Figure 1 of {title_en[:30]}"
-        })
-
-    blocks.append({
-        "type": "section",
-        "text": {
-            "type": "mrkdwn",
-            "text": summary
-        }
-    })
-    blocks.append({"type": "divider"})
-
-    payload = {"blocks": blocks}
+    payload = {
+        "blocks": [
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": header_text
+                }
+            },
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": summary
+                }
+            },
+            {"type": "divider"}
+        ]
+    }
 
     res = requests.post(webhook_url, json=payload)
     if res.status_code == 200:
-        print("[INFO] Slackへの送信が完了しました (タイトル/著者/プレビュー画像付き)。")
+        print("[INFO] Slackへの送信が完了しました (タイトル/著者付き・爆速版)。")
     else:
         print(f"[ERROR] Slack送信エラー: {res.status_code} - {res.text}")
 
@@ -333,92 +165,49 @@ def send_to_slack(session: str, url: str, title_en: str, authors_en: str, figure
 # ---------------------------------------------------------------------------
 def main():
     history = load_history()
-    
-    co = ChromiumOptions()
-    co.auto_port()
-    
-    if platform.system() == "Linux":
-        chrome_binaries = ["/usr/bin/google-chrome", "/usr/bin/chromium-browser", "/usr/bin/chromium"]
-        for b in chrome_binaries:
-            if os.path.exists(b):
-                co.set_browser_path(b)
-                print(f"[INFO] Linux Chrome binary detected: {b}")
-                break
-        co.set_argument('--no-sandbox')
-        co.set_argument('--disable-gpu')
-        co.set_argument('--disable-dev-shm-usage')
+    processed_count = 0
 
-    page = ChromiumPage(co)
+    print("[INFO] 超軽量・超高速モードで論文データを取得中...")
 
-    try:
-        papers = fetch_papers_list(page)
-        
-        # もし Webスクレイピングが Cloudflare で0件となった場合、サンプルDOIリストから自動でロード
-        if not papers:
-            print("[INFO] Webスクレイピングがブロックされたため、API経由で論文リストを自動ロードします...")
-            sample_doi_suffixes = [
-                "3791766", "3791278", "3791899", "3790977", "3790735",
-                "3790721", "3791725", "3791100", "3791200", "3791300"
-            ]
-            for suf in sample_doi_suffixes:
-                u = f"https://dl.acm.org/doi/10.1145/3772318.{suf}"
-                papers.append({
-                    "title": f"Paper 10.1145/3772318.{suf}",
-                    "url": u,
-                    "session": "ACM CHI Conference"
-                })
+    for suf in PAPER_DOI_LIST:
+        if processed_count >= MAX_DAILY_PAPERS:
+            print(f"[INFO] 本日の上限 ({MAX_DAILY_PAPERS}件) に達したため終了します。")
+            break
 
-        processed_count = 0
+        paper_url = f"https://dl.acm.org/doi/10.1145/3772318.{suf}"
 
-        for paper in papers:
-            if processed_count >= MAX_DAILY_PAPERS:
-                print(f"[INFO] 本日の上限 ({MAX_DAILY_PAPERS}件) に達したため終了します。")
-                break
+        if paper_url in history:
+            continue
 
-            paper_id = paper["url"]
+        print(f"\n==========================================")
+        print(f"[処理開始 ({processed_count + 1}/{MAX_DAILY_PAPERS})]: DOI 10.1145/3772318.{suf}")
 
-            if paper_id in history:
-                continue
+        details = fetch_paper_details_api(suf)
+        if not details or not details.get("abstract"):
+            print(f"[SKIP] テキスト(Abstract)が取得できなかったためスキップします。")
+            continue
 
-            print(f"\n==========================================")
-            print(f"[処理開始 ({processed_count + 1}/{MAX_DAILY_PAPERS})]: {paper['title']}")
+        try:
+            summary = summarize_with_gemini(details["title"], details["abstract"])
+            send_to_slack(
+                session=details["session"],
+                url=details["url"],
+                title_en=details["title"],
+                authors_en=details["authors"],
+                summary=summary
+            )
 
-            details = fetch_paper_details(page, paper["url"])
-            
-            paper_title_en = details.get("title") or paper["title"]
-            paper_authors_en = details.get("authors") or "Authors Unknown"
-            figure_url = details.get("figure_url")
-            paper_text = details.get("abstract")
-            
-            if not paper_text or len(paper_text.strip()) < 50:
-                print(f"[SKIP] テキスト(Abstract)が抽出できなかったためスキップします。")
-                continue
+            history.append(paper_url)
+            save_history(history)
+            processed_count += 1
 
-            try:
-                summary = summarize_with_gemini(paper_title_en, paper_text)
-                send_to_slack(
-                    session=paper["session"],
-                    url=paper["url"],
-                    title_en=paper_title_en,
-                    authors_en=paper_authors_en,
-                    figure_url=figure_url,
-                    summary=summary
-                )
+            # API レート制限回避のため 6秒待機
+            time.sleep(6)
 
-                history.append(paper_id)
-                save_history(history)
-                processed_count += 1
+        except Exception as e:
+            print(f"[ERROR] 処理中にエラーが発生しました: {e}")
 
-                # Gemini API レート制限回避のため 6秒待機
-                time.sleep(6)
-
-            except Exception as e:
-                print(f"[ERROR] 処理中にエラーが発生しました: {e}")
-
-        print(f"\n[INFO] 処理完了。本日新たに処理した論文数: {processed_count} 件")
-
-    finally:
-        page.quit()
+    print(f"\n[INFO] 処理完了。本日新たに処理した論文数: {processed_count} 件")
 
 
 if __name__ == "__main__":
