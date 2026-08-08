@@ -1,5 +1,6 @@
 import json
 import os
+import platform
 import re
 import sys
 import time
@@ -185,7 +186,7 @@ def summarize_with_gemini(title: str, text: str) -> str:
 """
 
     response = client.models.generate_content(
-        model="gemini-3.5-flash",
+        model="gemini-2.5-flash",
         contents=prompt,
     )
     return response.text
@@ -236,11 +237,19 @@ def main():
     
     co = ChromiumOptions()
     co.auto_port()
-    # GitHub Actions (Linux 実行環境) 対応パラメータ
-    co.set_argument('--headless=new')
-    co.set_argument('--no-sandbox')
-    co.set_argument('--disable-gpu')
-    co.set_argument('--disable-dev-shm-usage')
+    
+    # OS判別による Linux / GitHub Actions 環境設定
+    if platform.system() == "Linux":
+        chrome_binaries = ["/usr/bin/google-chrome", "/usr/bin/chromium-browser", "/usr/bin/chromium"]
+        for b in chrome_binaries:
+            if os.path.exists(b):
+                co.set_browser_path(b)
+                print(f"[INFO] Linux Chrome binary detected: {b}")
+                break
+        co.set_argument('--headless=new')
+        co.set_argument('--no-sandbox')
+        co.set_argument('--disable-gpu')
+        co.set_argument('--disable-dev-shm-usage')
 
     page = ChromiumPage(co)
 
