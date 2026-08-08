@@ -17,22 +17,22 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install Google Chrome
+      - name: Install Google Chrome and Xvfb
         run: |
           sudo apt-get update
-          sudo apt-get install -y google-chrome-stable
+          sudo apt-get install -y google-chrome-stable xvfb
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install DrissionPage beautifulsoup4 google-genai requests pypdf
 
-      - name: Run Paper Summarizer
+      - name: Run Paper Summarizer with Virtual Display
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
         run: |
-          python acm_slack_notifier.py
+          xvfb-run --auto-servernum python acm_slack_notifier.py
 
       - name: Commit and push updated history
         run: |
