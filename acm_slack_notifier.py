@@ -186,7 +186,7 @@ def summarize_with_gemini(title: str, text: str) -> str:
 """
 
     response = client.models.generate_content(
-        model="gemini-3.5-flash",
+        model="gemini-2.5-flash",
         contents=prompt,
     )
     return response.text
@@ -214,8 +214,8 @@ def send_to_slack(session: str, url: str, summary: str) -> None:
             {
                 "type": "section",
                 "text": {
-                    "type": "mrkdwn",
-                    "text": summary
+                    "text": summary,
+                    "type": "mrkdwn"
                 }
             },
             {"type": "divider"}
@@ -238,7 +238,7 @@ def main():
     co = ChromiumOptions()
     co.auto_port()
     
-    # OS判別による Linux / GitHub Actions 環境設定
+    # Linux (GitHub Actions / CI) 環境でのパス自動検出とオプション設定
     if platform.system() == "Linux":
         chrome_binaries = ["/usr/bin/google-chrome", "/usr/bin/chromium-browser", "/usr/bin/chromium"]
         for b in chrome_binaries:
@@ -246,7 +246,6 @@ def main():
                 co.set_browser_path(b)
                 print(f"[INFO] Linux Chrome binary detected: {b}")
                 break
-        co.set_argument('--headless=new')
         co.set_argument('--no-sandbox')
         co.set_argument('--disable-gpu')
         co.set_argument('--disable-dev-shm-usage')
