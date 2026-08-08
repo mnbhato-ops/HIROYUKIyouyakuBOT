@@ -48,7 +48,7 @@ def fetch_papers_list(page: ChromiumPage) -> List[Dict[str, str]]:
     
     page.get(PROCEEDINGS_URL)
     
-    # Cloudflare 通過待機 (最大 45 秒間しっかり待機)
+    # Cloudflare 通過待機
     print("[INFO] Cloudflare セキュリティ判定の通過を待機中...")
     cf_cleared = False
     for i in range(45):
@@ -70,7 +70,7 @@ def fetch_papers_list(page: ChromiumPage) -> List[Dict[str, str]]:
     except Exception:
         pass
 
-    # スクロールして遅延読み込みを完了させる
+    # スクロール
     for _ in range(3):
         page.scroll.down(1000)
         time.sleep(1)
@@ -173,19 +173,8 @@ def fetch_paper_details_api(paper_url: str) -> Optional[Dict[str, str]]:
     return None
 
 
-def fetch_paper_details(page: ChromiumPage, paper_url: str) -> Dict[str, Optional[str]]:
-    """論文詳細ページから Abstract・著者名・Figure 1 画像URL を取得"""
-    print(f"[INFO] 論文詳細情報を取得中: {paper_url}")
-    
-    # 1. API でタイトル・Abstract・著者名を取得
-    api_data = fetch_paper_details_api(paper_url)
-    
-    # 2. ブラウザで ACM DL 論文個別ページから Figure 1 (メイン図表) 画像 URL と著者名を補完取得
-    figure_url = None
-    page_authors = ""
-    abstract_text = api_data.get("abstract") if api_data else ""
-    paper_title = api_data.get("title") if api_data else None
-
+def fetch_public_figure_url(page: ChromiumPage, paper_url: str) -> Optional[str]:
+    """ACM DL の論文ページから Figure 1 画像をダウンロードし、Slackが直接表示できる公開URLに変換する"""
     try:
         page.get(paper_url)
         for i in range(10):
@@ -194,43 +183,48 @@ def fetch_paper_details(page: ChromiumPage, paper_url: str) -> Dict[str, Optiona
             else:
                 break
 
-        html = page.html
-        soup = BeautifulSoup(html, "html.parser")
+        img_ele = page.ele('css:figure img') or page.ele('css:.teaser img') or page.ele('css:img[src*="/cms/"]')
+        if img_ele:
+            saved_file = img_ele.save(name="temp_figure.jpg")
+            if saved_file and os.path.exists(saved_file):
+                with open(saved_file, "rb") as f:
+                    img_bytes = f.read()
+                
+                try:
+                    os.remove(saved_file)
+                except Exception:
+                    pass
 
-        # Abstract が API で取れなかった場合ブラウザから抽出
-        if not abstract_text:
-            abstract_elem = soup.find(class_=re.compile(r"abstractSection|abstractInFull|abstract-content")) or \
-                            soup.find("section", id="abstract") or \
-                            soup.find("div", class_=re.compile(r"abstract"))
-            abstract_text = abstract_elem.get_text(strip=True) if abstract_elem else ""
-
-        # 著者名が API で取れなかった場合ブラウザから抽出
-        if not (api_data and api_data.get("authors")):
-            authors_elems = soup.find_all(class_=re.compile(r"author-name|author|given-name"))
-            if authors_elems:
-                names = [a.get_text(strip=True) for a in authors_elems if len(a.get_text(strip=True)) > 2]
-                page_authors = ", ".join(dict.fromkeys(names))
-
-        # Figure 1 / メインティーザー画像の抽出
-        fig_tags = soup.find_all(["figure", "div"], class_=re.compile(r"figure|teaser|graphical-abstract|article-figure", re.I))
-        for ft in fig_tags:
-            img = ft.find("img")
-            if img and img.get("src"):
-                src = img.get("src")
-                figure_url = "https://dl.acm.org" + src if src.startswith("/") else src
-                break
-
-        if not figure_url:
-            for img in soup.find_all("img"):
-                src = img.get("src", "")
-                if "/cms/10.1145/" in src or "/cms/attachment/" in src or "fig1" in src.lower() or "downloadFigures" in src:
-                    figure_url = "https://dl.acm.org" + src if src.startswith("/") else src
-                    break
-
+                if len(img_bytes) > 1000:
+                    # 無料パブリック画像ホストにアップロードして Slack 表示用パブリックURLを生成
+                    r = requests.post(
+                        "https://catbox.moe/user/api.php",
+                        data={"reqtype": "fileupload"},
+                        files={"fileToUpload": ("figure.jpg", img_bytes, "image/jpeg")},
+                        timeout=15
+                    )
+                    if r.status_code == 200 and r.text.startswith("http"):
+                        pub_url = r.text.strip()
+                        print(f"[INFO] Figure 画像のプレビュー化に成功: {pub_url}")
+                        return pub_url
     except Exception as e:
-        print(f"[WARN] ブラウザでの詳細取得中にエラー (スキップして続行): {e}")
+        print(f"[WARN] Figure 画像の処理中に例外 (スキップして続行): {e}")
+    return None
 
-    authors_final = (api_data.get("authors") if api_data and api_data.get("authors") else page_authors) or "Authors Unknown"
+
+def fetch_paper_details(page: ChromiumPage, paper_url: str) -> Dict[str, Optional[str]]:
+    """論文詳細ページから Abstract・著者名・Figure 1 公開画像URL を取得"""
+    print(f"[INFO] 論文詳細情報を取得中: {paper_url}")
+    
+    # 1. API でタイトル・Abstract・著者名を取得
+    api_data = fetch_paper_details_api(paper_url)
+    
+    # 2. ブラウザで Figure 1 (メイン図表) 画像を抽出し、Slack表示可能な公開URLを取得
+    figure_url = fetch_public_figure_url(page, paper_url)
+    
+    abstract_text = api_data.get("abstract") if api_data else ""
+    paper_title = api_data.get("title") if api_data else None
+    authors_final = (api_data.get("authors") if api_data and api_data.get("authors") else "") or "Authors Unknown"
 
     return {
         "title": paper_title,
@@ -284,7 +278,7 @@ def send_to_slack(session: str, url: str, title_en: str, authors_en: str, figure
         print("[WARN] SLACK_WEBHOOK_URL 未設定のため画面に要約を出力します:\n")
         print(header_text)
         if figure_url:
-            print(f"🖼️ Figure Image URL: {figure_url}")
+            print(f"🖼️ Figure Public Image URL: {figure_url}")
         print("\n" + summary)
         return
 
@@ -319,7 +313,7 @@ def send_to_slack(session: str, url: str, title_en: str, authors_en: str, figure
 
     res = requests.post(webhook_url, json=payload)
     if res.status_code == 200:
-        print("[INFO] Slackへの送信が完了しました (タイトル/著者/画像付き)。")
+        print("[INFO] Slackへの送信が完了しました (タイトル/著者/プレビュー画像付き)。")
     else:
         print(f"[ERROR] Slack送信エラー: {res.status_code} - {res.text}")
 
