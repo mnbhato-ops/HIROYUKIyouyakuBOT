@@ -2,7 +2,7 @@ name: ACM Paper Summarizer
 
 on:
   schedule:
-    - cron: '0 0 * * *' # 毎日午前9時(JST)に実行
+    - cron: '0 0 * * *'
   workflow_dispatch:
 
 jobs:
@@ -20,7 +20,7 @@ jobs:
       - name: Install Google Chrome
         run: |
           sudo apt-get update
-          sudo apt-get install -y wget google-chrome-stable
+          sudo apt-get install -y google-chrome-stable
 
       - name: Install dependencies
         run: |
