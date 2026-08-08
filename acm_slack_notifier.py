@@ -48,7 +48,7 @@ def fetch_papers_list(page: ChromiumPage) -> List[Dict[str, str]]:
     
     page.get(PROCEEDINGS_URL)
     
-    # Cloudflare 通過待機
+    # Cloudflare 通過待機 (最大 45 秒間しっかり待機)
     print("[INFO] Cloudflare セキュリティ判定の通過を待機中...")
     cf_cleared = False
     for i in range(45):
@@ -177,11 +177,12 @@ def fetch_public_figure_url(page: ChromiumPage, paper_url: str) -> Optional[str]
     """ACM DL の論文ページから Figure 1 画像をダウンロードし、Slackが直接表示できる公開URLに変換する"""
     try:
         page.get(paper_url)
-        for i in range(10):
-            if "Just a moment" in page.title or "しばらく" in page.title:
-                time.sleep(1)
-            else:
+        # Cloudflare 通過を最大 25 秒間しっかり待機
+        for i in range(25):
+            title = page.title
+            if "Just a moment" not in title and "しばらく" not in title and title:
                 break
+            time.sleep(1)
 
         img_ele = page.ele('css:figure img') or page.ele('css:.teaser img') or page.ele('css:img[src*="/cms/"]')
         if img_ele:
@@ -196,7 +197,6 @@ def fetch_public_figure_url(page: ChromiumPage, paper_url: str) -> Optional[str]
                     pass
 
                 if len(img_bytes) > 1000:
-                    # 無料パブリック画像ホストにアップロードして Slack 表示用パブリックURLを生成
                     r = requests.post(
                         "https://catbox.moe/user/api.php",
                         data={"reqtype": "fileupload"},
@@ -235,7 +235,7 @@ def fetch_paper_details(page: ChromiumPage, paper_url: str) -> Dict[str, Optiona
 
 
 # ---------------------------------------------------------------------------
-# Gemini API (gemini-2.5-flash)
+# Gemini API (gemini-2.5-flash / 自動リトライ付き)
 # ---------------------------------------------------------------------------
 def summarize_with_gemini(title: str, text: str) -> str:
     api_key = os.getenv("GEMINI_API_KEY")
@@ -259,11 +259,21 @@ def summarize_with_gemini(title: str, text: str) -> str:
 {text[:12000]}
 """
 
-    response = client.models.generate_content(
-        model="gemini-3.5-flash",
-        contents=prompt,
-    )
-    return response.text
+    for attempt in range(3):
+        try:
+            response = client.models.generate_content(
+                model="gemini-3.5-flash",
+                contents=prompt,
+            )
+            return response.text
+        except Exception as e:
+            if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
+                print(f"[WARN] Gemini API レート制限(429)を検知。30秒待機して自動リトライします... ({attempt + 1}/3)")
+                time.sleep(30)
+            else:
+                raise e
+                
+    raise RuntimeError("Gemini API のリトライ上限に達しました。")
 
 
 # ---------------------------------------------------------------------------
@@ -399,7 +409,8 @@ def main():
                 save_history(history)
                 processed_count += 1
 
-                time.sleep(3)
+                # Gemini API レート制限回避のため 6秒待機
+                time.sleep(6)
 
             except Exception as e:
                 print(f"[ERROR] 処理中にエラーが発生しました: {e}")
