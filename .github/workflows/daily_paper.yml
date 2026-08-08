@@ -1,17 +1,15 @@
-name: Daily ACM Paper Summarizer
+name: ACM Paper Summarizer
 
 on:
   schedule:
-    # 毎日 00:00 UTC (日本時間 09:00 AM) に自動実行
-    - cron: '0 0 * * *'
-  workflow_dispatch: # 手動実行ボタン
+    - cron: '0 0 * * *' # 毎日午前9時(JST)に実行
+  workflow_dispatch:
 
 jobs:
-  run-summarizer:
+  summarize:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout Repository
+      - name: Checkout code
         uses: actions/checkout@v4
 
       - name: Set up Python
@@ -19,23 +17,26 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install Dependencies
+      - name: Install Google Chrome
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wget google-chrome-stable
+
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install DrissionPage beautifulsoup4 google-genai requests pypdf
 
       - name: Run Paper Summarizer
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
         run: |
-          python main.py
+          python acm_slack_notifier.py
 
-      - name: Commit and Push Updated History
+      - name: Commit and push updated history
         run: |
-          git config --local user.email "github-actions[bot]@users.noreply.github.com"
-          git config --local user.name "github-actions[bot]"
-          if [ -f processed_papers.json ]; then
-            git add processed_papers.json
-            git diff --quiet && git diff --staged --quiet || (git commit -m "Chore: Update processed papers history [skip ci]" && git push)
-          fi
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add processed_papers.json
+          git diff --quiet && git diff --staged --quiet || (git commit -m "Update processed papers history" && git push)
