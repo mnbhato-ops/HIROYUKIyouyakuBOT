@@ -1,4 +1,0 @@
-google-genai
-requests
-beautifulsoup4
-pypdf
