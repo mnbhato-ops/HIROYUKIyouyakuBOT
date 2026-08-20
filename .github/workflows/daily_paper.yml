@@ -1,10 +1,13 @@
-name: ACM Paper Summarizer
+name: ACM Paper Summarizer (CHI & UIST)
 
 on:
   schedule:
     # 日本時間 (JST) 平日(月〜金) 朝9:00 に自動実行 (UTC 0:00 = JST 9:00)
     - cron: '0 0 * * 1-5'
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   summarize:
@@ -23,16 +26,23 @@ jobs:
           python -m pip install --upgrade pip
           pip install google-genai requests
 
-      - name: Run Paper Summarizer (Lightweight Fast Mode)
+      - name: Run CHI 2026 Notifier (5 papers)
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
         run: |
-          python acm_slack_notifier.py
+          python chi_notifier.py
 
-      - name: Commit and push updated history
+      - name: Run UIST 2025 Notifier (2 papers)
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          python uist_notifier.py
+
+      - name: Commit and push updated histories
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git add processed_papers.json
-          git diff --quiet && git diff --staged --quiet || (git commit -m "Update processed papers history" && git push)
+          git add processed_chi.json processed_uist.json
+          git diff --quiet && git diff --staged --quiet || (git commit -m "Update CHI and UIST processed paper histories" && git push)
