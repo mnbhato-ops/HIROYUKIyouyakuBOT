@@ -12,18 +12,14 @@ import requests
 # 設定値 (CHI 2026 用)
 # ---------------------------------------------------------------------------
 PROCEEDINGS_URL = "https://dl.acm.org/doi/proceedings/10.1145/3772318"
-HISTORY_FILE = "processed_papers.json"
-MAX_DAILY_PAPERS = 5  # 1日5個
+HISTORY_FILE = "processed_chi.json"  # CHI専用履歴ファイル
+MAX_DAILY_PAPERS = 5  # 1日5件
 
-# ACM CHI 2026 プロシーディング (10.1145/3772318) の DOI 連番レンジ (3790700 〜 3792400)
 DOI_START = 3790700
 DOI_END = 3792400
 TOTAL_PROCEEDINGS_PAPERS = DOI_END - DOI_START + 1  # 全1,701本
 
 
-# ---------------------------------------------------------------------------
-# 履歴管理機能 (URL / DOI / タイトルの三重重複排除)
-# ---------------------------------------------------------------------------
 def load_history() -> List[str]:
     if os.path.exists(HISTORY_FILE):
         try:
@@ -42,11 +38,7 @@ def save_history(history: List[str]) -> None:
         json.dump(history, f, ensure_ascii=False, indent=2)
 
 
-# ---------------------------------------------------------------------------
-# 学術API (Semantic Scholar) によるデータ取得
-# ---------------------------------------------------------------------------
 def fetch_paper_details_api(doi_suffix: int) -> Optional[Dict[str, str]]:
-    """API 経由でタイトル、著者名、Abstract を取得する"""
     doi = f"10.1145/3772318.{doi_suffix}"
     url = f"https://dl.acm.org/doi/{doi}"
     api_url = f"https://api.semanticscholar.org/graph/v1/paper/{doi}?fields=title,abstract,url,venue,authors"
@@ -75,9 +67,6 @@ def fetch_paper_details_api(doi_suffix: int) -> Optional[Dict[str, str]]:
     return None
 
 
-# ---------------------------------------------------------------------------
-# Gemini API (◆ 見出し版)
-# ---------------------------------------------------------------------------
 def summarize_with_gemini(title: str, text: str) -> str:
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
@@ -120,7 +109,6 @@ def summarize_with_gemini(title: str, text: str) -> str:
             )
             raw_text = response.text.strip()
             
-            # 前置き文言の完全除去
             if "◆" in raw_text:
                 cleaned_text = "◆" + raw_text.split("◆", 1)[1]
             elif "■" in raw_text:
@@ -128,13 +116,11 @@ def summarize_with_gemini(title: str, text: str) -> str:
             else:
                 cleaned_text = raw_text
 
-            # 見出しの後ろの補足カッコ文字を正規表現で強制排除
             cleaned_text = re.sub(r"[◆■]\s*一言概要\s*[\(（][^\)）]*[\)）]", "◆ 一言概要", cleaned_text)
             cleaned_text = re.sub(r"[◆■]\s*研究の背景・課題\s*[\(（][^\)）]*[\)）]", "◆ 研究の背景・課題", cleaned_text)
             cleaned_text = re.sub(r"[◆■]\s*提案手法・アプローチ\s*[\(（][^\)）]*[\)）]", "◆ 提案手法・アプローチ", cleaned_text)
             cleaned_text = re.sub(r"[◆■]\s*主な結果・成果\s*[\(（][^\)）]*[\)）]", "◆ 主な結果・成果", cleaned_text)
             
-            # 見出し記号を ◆ に統一
             cleaned_text = cleaned_text.replace("■ 一言概要", "◆ 一言概要")
             cleaned_text = cleaned_text.replace("■ 研究の背景・課題", "◆ 研究の背景・課題")
             cleaned_text = cleaned_text.replace("■ 提案手法・アプローチ", "◆ 提案手法・アプローチ")
@@ -155,13 +141,9 @@ def summarize_with_gemini(title: str, text: str) -> str:
     raise RuntimeError("Gemini API 呼び出しに失敗しました。")
 
 
-# ---------------------------------------------------------------------------
-# Slack 通知 (CHI 2026 専用・赤ファイヤー 🔥 版)
-# ---------------------------------------------------------------------------
 def send_to_slack(current_paper_num: int, total_count: int, url: str, title: str, authors: str, summary: str) -> None:
     webhook_url = os.getenv("SLACK_WEBHOOK_URL")
     
-    # 🚀 順番: 1本 / 1701本 🔥 CHI2026
     header_text = (
         f"*🚀 順番:* {current_paper_num}本 / {total_count}本  🔥 CHI2026\n"
         f"*📖 Title:* {title}\n"
@@ -202,14 +184,19 @@ def send_to_slack(current_paper_num: int, total_count: int, url: str, title: str
         print(f"[ERROR] Slack送信エラー: {res.status_code} - {res.text}")
 
 
-# ---------------------------------------------------------------------------
-# メインルーチン
-# ---------------------------------------------------------------------------
 def main():
     history = load_history()
     processed_count = 0
 
+    # 過去の履歴に含まれるURLの数を正確にカウント (旧ファイル互換)
+    past_sent_urls = [
+        h for h in history 
+        if isinstance(h, str) and ("dl.acm.org/doi/" in h or h.startswith("http"))
+    ]
+    valid_paper_counter = len(past_sent_urls)
+
     print(f"[INFO] CHI 2026 プロシーディング全体 ({TOTAL_PROCEEDINGS_PAPERS}本) から有効な論文データを探索中...")
+    print(f"[INFO] 過去の送信済み論文数: {valid_paper_counter}本")
 
     for doi_suffix in range(DOI_START, DOI_END + 1):
         if processed_count >= MAX_DAILY_PAPERS:
@@ -218,7 +205,7 @@ def main():
 
         paper_url = f"https://dl.acm.org/doi/10.1145/3772318.{doi_suffix}"
 
-        # URL、DOI、タイトルの重複チェックガード
+        # 過去に送信済みのURLならスキップ
         if paper_url in history:
             continue
 
@@ -231,8 +218,8 @@ def main():
             print(f"[SKIP] タイトル/DOIが過去の送信履歴と重複しているためスキップ: {details['title'][:30]}")
             continue
 
-        # 履歴に含まれるURLの個数で通算論文数を計算
-        valid_paper_counter = len([h for h in history if h.startswith("https://")]) + 1
+        # 今回送信する本数 (+1)
+        valid_paper_counter += 1
 
         print(f"\n==========================================")
         print(f"[処理開始 ({valid_paper_counter}本 / {TOTAL_PROCEEDINGS_PAPERS}本 | 本日 {processed_count + 1}/{MAX_DAILY_PAPERS}件)]: DOI 10.1145/3772318.{doi_suffix}")
@@ -248,7 +235,7 @@ def main():
                 summary=summary
             )
 
-            # URL・DOI・タイトルを全て履歴に保存して絶対重複防止
+            # URL・DOI・タイトルを履歴に保存
             history.append(paper_url)
             history.append(details["doi"])
             history.append(details["title"])
@@ -259,8 +246,9 @@ def main():
 
         except Exception as e:
             print(f"[ERROR] 処理中にエラーが発生しました: {e}")
+            valid_paper_counter -= 1
 
-    print(f"\n[INFO] 処理完了。本日新たに処理した論文数: {processed_count} 件")
+    print(f"\n[INFO] CHI 2026 処理完了。本日新たに処理した論文数: {processed_count} 件")
 
 
 if __name__ == "__main__":
