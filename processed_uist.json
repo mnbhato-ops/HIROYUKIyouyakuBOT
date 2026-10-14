@@ -214,5 +214,11 @@
   "EI-Lite: Electrical Impedance Sensing for Micro-gesture Recognition and Pinch Force Estimation",
   "https://dl.acm.org/doi/10.1145/3746059.3747672",
   "10.1145/3746059.3747672",
-  "SQUIRE: Interactive UI Authoring via Slot QUery Intermediate REpresentations"
+  "SQUIRE: Interactive UI Authoring via Slot QUery Intermediate REpresentations",
+  "https://dl.acm.org/doi/10.1145/3746059.3747674",
+  "10.1145/3746059.3747674",
+  "AttentionAR: AR Adaptation and Warning for Real-World Safety via Attention Modeling and MLLM Reasoning",
+  "https://dl.acm.org/doi/10.1145/3746059.3747676",
+  "10.1145/3746059.3747676",
+  "agentAR: Creating Augmented Reality Applications with Tool-Augmented LLM-based Autonomous Agents"
 ]
