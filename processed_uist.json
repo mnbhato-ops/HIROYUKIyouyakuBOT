@@ -220,5 +220,11 @@
   "AttentionAR: AR Adaptation and Warning for Real-World Safety via Attention Modeling and MLLM Reasoning",
   "https://dl.acm.org/doi/10.1145/3746059.3747676",
   "10.1145/3746059.3747676",
-  "agentAR: Creating Augmented Reality Applications with Tool-Augmented LLM-based Autonomous Agents"
+  "agentAR: Creating Augmented Reality Applications with Tool-Augmented LLM-based Autonomous Agents",
+  "https://dl.acm.org/doi/10.1145/3746059.3747675",
+  "10.1145/3746059.3747675",
+  "SoilSense: Appropriating Soil-based Microbial Fuel Cells to Create Tangible Interfaces",
+  "https://dl.acm.org/doi/10.1145/3746059.3747678",
+  "10.1145/3746059.3747678",
+  "InSituTale: Enhancing Augmented Data Storytelling with Physical Objects"
 ]
