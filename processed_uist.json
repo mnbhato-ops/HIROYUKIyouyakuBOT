@@ -226,5 +226,11 @@
   "SoilSense: Appropriating Soil-based Microbial Fuel Cells to Create Tangible Interfaces",
   "https://dl.acm.org/doi/10.1145/3746059.3747678",
   "10.1145/3746059.3747678",
-  "InSituTale: Enhancing Augmented Data Storytelling with Physical Objects"
+  "InSituTale: Enhancing Augmented Data Storytelling with Physical Objects",
+  "https://dl.acm.org/doi/10.1145/3746059.3747673",
+  "10.1145/3746059.3747673",
+  "Can You Move These Over There? Exploring an LLM-based VR Mover to Support Natural Multi-object Manipulation",
+  "https://dl.acm.org/doi/10.1145/3746059.3747677",
+  "10.1145/3746059.3747677",
+  "BloomIntent: Automating Search Evaluation with LLM-Generated Fine-Grained User Intents"
 ]
