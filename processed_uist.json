@@ -232,5 +232,11 @@
   "Can You Move These Over There? Exploring an LLM-based VR Mover to Support Natural Multi-object Manipulation",
   "https://dl.acm.org/doi/10.1145/3746059.3747677",
   "10.1145/3746059.3747677",
-  "BloomIntent: Automating Search Evaluation with LLM-Generated Fine-Grained User Intents"
+  "BloomIntent: Automating Search Evaluation with LLM-Generated Fine-Grained User Intents",
+  "https://dl.acm.org/doi/10.1145/3746059.3747679",
+  "10.1145/3746059.3747679",
+  "HydroHaptics: High-Fidelity Force-Feedback on Soft Deformable Interfaces using Hydrostatic Transmission",
+  "https://dl.acm.org/doi/10.1145/3746059.3747680",
+  "10.1145/3746059.3747680",
+  "Policy Maps: Tools for Guiding the Unbounded Space of LLM Behaviors"
 ]
