@@ -250,5 +250,11 @@
   "Repurposing Audio Playback Tools to Test Human Localization with 6DoF Sound",
   "https://dl.acm.org/doi/10.1145/3746059.3747684",
   "10.1145/3746059.3747684",
-  "Squiggle: Multimodal Lasso Selection in the Real World"
+  "Squiggle: Multimodal Lasso Selection in the Real World",
+  "https://dl.acm.org/doi/10.1145/3746059.3747696",
+  "10.1145/3746059.3747696",
+  "DialogLab: Authoring, Simulating, and Testing Dynamic Human-AI Group Conversations",
+  "https://dl.acm.org/doi/10.1145/3746059.3747700",
+  "10.1145/3746059.3747700",
+  "Scaling Context-Aware Task Assistants that Learn from Demonstration and Adapt through Mixed-Initiative Dialogue"
 ]
