@@ -292,5 +292,11 @@
   "IMUCoCo: Enabling Flexible On-Body IMU Placement for Human Pose Estimation and Activity Recognition",
   "https://dl.acm.org/doi/10.1145/3746059.3747697",
   "10.1145/3746059.3747697",
-  "NarraGuide: an LLM-based Narrative Mobile Robot for Remote Place Exploration"
+  "NarraGuide: an LLM-based Narrative Mobile Robot for Remote Place Exploration",
+  "https://dl.acm.org/doi/10.1145/3746059.3747712",
+  "10.1145/3746059.3747712",
+  "Mod2Hap: Two Level Modular Haptic System for Body- and Hand- Interactions using Magnetorheological Fluid",
+  "https://dl.acm.org/doi/10.1145/3746059.3747727",
+  "10.1145/3746059.3747727",
+  "Rethinking Dataset Discovery with DataScout"
 ]
