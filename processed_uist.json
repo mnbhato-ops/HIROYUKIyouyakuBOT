@@ -364,5 +364,11 @@
   "InReAcTable: LLM-powered Interactive Visual Data Story Construction from Tabular Data",
   "https://dl.acm.org/doi/10.1145/3746059.3747720",
   "10.1145/3746059.3747720",
-  "Transforming Everyday Objects into Dynamic Interfaces using Smart Flat-Foldable Structures"
+  "Transforming Everyday Objects into Dynamic Interfaces using Smart Flat-Foldable Structures",
+  "https://dl.acm.org/doi/10.1145/3746059.3747721",
+  "10.1145/3746059.3747721",
+  "Streaming, Fast and Slow: Cognitive Load-Aware Streaming for Efficient LLM Serving",
+  "https://dl.acm.org/doi/10.1145/3746059.3747722",
+  "10.1145/3746059.3747722",
+  "Creating General User Models from Computer Use"
 ]
