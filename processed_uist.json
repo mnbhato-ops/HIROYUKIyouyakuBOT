@@ -370,5 +370,11 @@
   "Streaming, Fast and Slow: Cognitive Load-Aware Streaming for Efficient LLM Serving",
   "https://dl.acm.org/doi/10.1145/3746059.3747722",
   "10.1145/3746059.3747722",
-  "Creating General User Models from Computer Use"
+  "Creating General User Models from Computer Use",
+  "https://dl.acm.org/doi/10.1145/3746059.3747724",
+  "10.1145/3746059.3747724",
+  "LiDArgus: Accommodating Diverse Privacy Preferences in LiDAR Sensing Through Configurable Sub-Zoning",
+  "https://dl.acm.org/doi/10.1145/3746059.3747725",
+  "10.1145/3746059.3747725",
+  "MEDebiaser: A Human-AI Feedback System for Mitigating Bias in Multi-label Medical Image Classification"
 ]
